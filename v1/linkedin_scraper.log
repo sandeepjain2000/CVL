@@ -1,0 +1,83 @@
+2026-03-07 23:05:33,324 [INFO] === LinkedIn Scraper Starting ===
+2026-03-07 23:05:33,325 [INFO] Search config: {
+  "country": "Austria",
+  "industry": "Software Development",
+  "company_size": "11-200",
+  "keywords": [
+    "saas",
+    "cloud",
+    "ai",
+    "software"
+  ],
+  "job_titles_for_discovery": [
+    "software engineer",
+    "python developer",
+    "data engineer"
+  ],
+  "search_strategy": [
+    "linkedin_company_search",
+    "linkedin_job_listings"
+  ],
+  "max_pages": 10,
+  "max_companies": 5
+}
+2026-03-07 23:05:33,819 [INFO] Launching Firefox browser…
+2026-03-07 23:05:34,817 [INFO] Firefox launched.
+2026-03-07 23:05:34,818 [INFO] No session file found. Opening LinkedIn for manual login.
+Please log in, then press ENTER in this terminal to continue.
+2026-03-07 23:07:32,229 [INFO] Session saved to 'linkedin_state.json'.
+2026-03-07 23:07:32,292 [INFO] Starting company discovery…
+2026-03-07 23:07:32,784 [INFO] Voyager API interception active on page.
+2026-03-07 23:07:32,784 [INFO] Company search – keyword: 'saas'
+2026-03-07 23:07:41,038 [INFO]   Page 1 – found 10 new URLs (total: 10)
+2026-03-07 23:07:45,020 [INFO] Company discovery complete – 5 unique URLs collected.
+2026-03-07 23:07:45,020 [INFO] ─── Processing company 1 / 5 ───
+2026-03-07 23:07:45,020 [INFO] Scraping company: https://www.linkedin.com/company/saas-capital
+2026-03-07 23:07:45,610 [INFO] Voyager API interception active on page.
+2026-03-07 23:07:55,011 [INFO]   Used DOM scrape for 'SaaS Capital'.
+2026-03-07 23:07:55,018 [INFO] Discovering employees for 'SaaS Capital'…
+2026-03-07 23:07:55,621 [INFO] Voyager API interception active on page.
+2026-03-07 23:08:10,062 [INFO]   Collected 8 employees via DOM for 'SaaS Capital'.
+2026-03-07 23:08:10,069 [INFO] Saved 1 company records → companies.csv / companies.json
+2026-03-07 23:08:10,071 [INFO] Saved 8 employee records → employees.csv / employees.json
+2026-03-07 23:08:16,119 [INFO] ─── Processing company 2 / 5 ───
+2026-03-07 23:08:16,120 [INFO] Scraping company: https://www.linkedin.com/company/saas
+2026-03-07 23:08:16,549 [INFO] Voyager API interception active on page.
+2026-03-07 23:08:28,819 [INFO]   Used DOM scrape for 'SaaS'.
+2026-03-07 23:08:28,824 [INFO] Discovering employees for 'SaaS'…
+2026-03-07 23:08:29,385 [INFO] Voyager API interception active on page.
+2026-03-07 23:08:45,252 [INFO]   Collected 5 employees via DOM for 'SaaS'.
+2026-03-07 23:08:45,259 [INFO] Saved 1 company records → companies.csv / companies.json
+2026-03-07 23:08:45,261 [INFO] Saved 5 employee records → employees.csv / employees.json
+2026-03-07 23:08:53,446 [INFO] ─── Processing company 3 / 5 ───
+2026-03-07 23:08:53,446 [INFO] Scraping company: https://www.linkedin.com/company/saas-mantra
+2026-03-07 23:08:53,881 [INFO] Voyager API interception active on page.
+2026-03-07 23:09:03,867 [INFO]   Used DOM scrape for 'SaaS Mantra'.
+2026-03-07 23:09:03,873 [INFO] Discovering employees for 'SaaS Mantra'…
+2026-03-07 23:09:04,520 [INFO] Voyager API interception active on page.
+2026-03-07 23:09:19,081 [INFO]   Collected 8 employees via DOM for 'SaaS Mantra'.
+2026-03-07 23:09:19,086 [INFO] Saved 1 company records → companies.csv / companies.json
+2026-03-07 23:09:19,088 [INFO] Saved 8 employee records → employees.csv / employees.json
+2026-03-07 23:09:26,713 [INFO] ─── Processing company 4 / 5 ───
+2026-03-07 23:09:26,713 [INFO] Scraping company: https://www.linkedin.com/company/saas-north-conference
+2026-03-07 23:09:27,094 [INFO] Voyager API interception active on page.
+2026-03-07 23:09:38,170 [INFO]   Used DOM scrape for 'SAAS NORTH Conference'.
+2026-03-07 23:09:38,175 [INFO] Discovering employees for 'SAAS NORTH Conference'…
+2026-03-07 23:09:38,798 [INFO] Voyager API interception active on page.
+2026-03-07 23:09:59,488 [INFO]   Collected 4 employees via DOM for 'SAAS NORTH Conference'.
+2026-03-07 23:09:59,497 [INFO] Saved 1 company records → companies.csv / companies.json
+2026-03-07 23:09:59,499 [INFO] Saved 4 employee records → employees.csv / employees.json
+2026-03-07 23:10:09,252 [INFO] ─── Processing company 5 / 5 ───
+2026-03-07 23:10:09,252 [INFO] Scraping company: https://www.linkedin.com/company/saas-group
+2026-03-07 23:10:09,623 [INFO] Voyager API interception active on page.
+2026-03-07 23:10:21,785 [INFO]   Used DOM scrape for 'saas.group'.
+2026-03-07 23:10:21,791 [INFO] Discovering employees for 'saas.group'…
+2026-03-07 23:10:22,421 [INFO] Voyager API interception active on page.
+2026-03-07 23:10:38,787 [INFO]   Collected 5 employees via DOM for 'saas.group'.
+2026-03-07 23:10:38,793 [INFO] Saved 1 company records → companies.csv / companies.json
+2026-03-07 23:10:38,795 [INFO] Saved 5 employee records → employees.csv / employees.json
+2026-03-07 23:10:48,272 [INFO] Session state updated in 'linkedin_state.json'.
+2026-03-07 23:10:48,905 [INFO] === Scraping Complete ===
+2026-03-07 23:10:48,906 [INFO] Companies collected : 5
+2026-03-07 23:10:48,906 [INFO] Employees collected : 30
+2026-03-07 23:10:48,906 [INFO] Output files: companies.csv, employees.csv, companies.json, employees.json

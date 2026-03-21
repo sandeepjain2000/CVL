@@ -1,0 +1,357 @@
+2026-03-16 00:51:17 [INFO   ] ============================================================
+2026-03-16 00:51:17 [INFO   ]   BOUNCE CHECKER
+2026-03-16 00:51:17 [INFO   ]   Run: 2026-03-16 00:51:17
+2026-03-16 00:51:17 [INFO   ] ============================================================
+2026-03-16 00:51:17 [INFO   ]   10 Gmail account(s) to check
+2026-03-16 00:51:17 [INFO   ]   0 sent email addresses in DB
+2026-03-16 00:51:17 [INFO   ]   No sent emails to check against — run a send campaign first.
+2026-03-16 06:21:25 [INFO   ] ============================================================
+2026-03-16 06:21:25 [INFO   ]   BOUNCE CHECKER
+2026-03-16 06:21:25 [INFO   ]   Run: 2026-03-16 06:21:25
+2026-03-16 06:21:25 [INFO   ] ============================================================
+2026-03-16 06:21:25 [INFO   ]   10 Gmail account(s) to check
+2026-03-16 06:21:25 [INFO   ]   29 sent email addresses in DB
+2026-03-16 06:21:25 [INFO   ] 
+  Checking: jain106sandeep@gmail.com
+2026-03-16 06:21:25 [INFO   ]   Connecting to jain106sandeep@gmail.com...
+2026-03-16 06:21:29 [INFO   ]   Found 152 potential bounce email(s)
+2026-03-16 06:23:33 [INFO   ] 
+  Checking: sj1799274@gmail.com
+2026-03-16 06:23:33 [INFO   ]   Connecting to sj1799274@gmail.com...
+2026-03-16 06:23:36 [INFO   ]   Found 64 potential bounce email(s)
+2026-03-16 06:24:12 [INFO   ] 
+  Checking: jain109sandeep@gmail.com
+2026-03-16 06:24:12 [INFO   ]   Connecting to jain109sandeep@gmail.com...
+2026-03-16 06:24:17 [INFO   ]   Found 271 potential bounce email(s)
+2026-03-16 06:27:16 [INFO   ]   📧 Bounce detected: constanze.matuschka@amhof8.com
+2026-03-16 06:27:55 [INFO   ]   ✓ Marked bounced: constanze.matuschka@amhof8.com
+2026-03-16 06:27:55 [INFO   ] 
+  Checking: jain111sandeep@gmail.com
+2026-03-16 06:27:55 [INFO   ]   Connecting to jain111sandeep@gmail.com...
+2026-03-16 06:27:59 [INFO   ]   Found 97 potential bounce email(s)
+2026-03-16 06:28:55 [INFO   ] 
+  Checking: sandeep196605@gmail.com
+2026-03-16 06:28:55 [INFO   ]   Connecting to sandeep196605@gmail.com...
+2026-03-16 06:28:59 [INFO   ]   Found 107 potential bounce email(s)
+2026-03-16 06:29:27 [INFO   ]   📧 Bounce detected: nicole.schmalzbauer@amhof8.com
+2026-03-16 06:30:15 [INFO   ]   ✓ Marked bounced: nicole.schmalzbauer@amhof8.com
+2026-03-16 06:30:15 [INFO   ] 
+  Checking: jain114sandeep@gmail.com
+2026-03-16 06:30:15 [INFO   ]   Connecting to jain114sandeep@gmail.com...
+2026-03-16 06:30:20 [INFO   ]   Found 90 potential bounce email(s)
+2026-03-16 06:30:50 [INFO   ]   📧 Bounce detected: johannes.kattus@amhof8.com
+2026-03-16 06:31:34 [INFO   ]   ✓ Marked bounced: johannes.kattus@amhof8.com
+2026-03-16 06:31:34 [INFO   ] 
+  Checking: jain105sandeep@gmail.com
+2026-03-16 06:31:34 [INFO   ]   Connecting to jain105sandeep@gmail.com...
+2026-03-16 06:31:37 [INFO   ]   Found 197 potential bounce email(s)
+2026-03-16 06:31:57 [INFO   ]   📧 Bounce detected: natascha.maria@amhof8.com
+2026-03-16 06:32:01 [INFO   ]   📧 Bounce detected: shahed.latif@arena-international.com
+2026-03-16 06:33:07 [INFO   ]   📧 Bounce detected: adriano.messina@benq.eu
+2026-03-16 06:33:29 [INFO   ]   ✓ Marked bounced: natascha.maria@amhof8.com
+2026-03-16 06:33:29 [INFO   ]   ✓ Marked bounced: shahed.latif@arena-international.com
+2026-03-16 06:33:29 [INFO   ]   ✓ Marked bounced: adriano.messina@benq.eu
+2026-03-16 06:33:29 [INFO   ] 
+  Checking: jain107sandeep@gmail.com
+2026-03-16 06:33:29 [INFO   ]   Connecting to jain107sandeep@gmail.com...
+2026-03-16 06:33:30 [ERROR  ]   IMAP error for jain107sandeep@gmail.com: b'[AUTHENTICATIONFAILED] Invalid credentials (Failure)'
+2026-03-16 06:33:30 [INFO   ] 
+  Checking: sj7634811@gmail.com
+2026-03-16 06:33:30 [INFO   ]   Connecting to sj7634811@gmail.com...
+2026-03-16 06:33:33 [INFO   ]   Found 233 potential bounce email(s)
+2026-03-16 06:33:40 [INFO   ]   📧 Bounce detected: dennis.jansen@benq.eu
+2026-03-16 06:36:02 [INFO   ]   ✓ Marked bounced: dennis.jansen@benq.eu
+2026-03-16 06:36:02 [INFO   ] 
+  Checking: jain115sandeep@gmail.com
+2026-03-16 06:36:02 [INFO   ]   Connecting to jain115sandeep@gmail.com...
+2026-03-16 06:36:06 [INFO   ]   Found 0 potential bounce email(s)
+2026-03-16 06:36:07 [INFO   ] 
+============================================================
+2026-03-16 06:36:07 [INFO   ]   Bounces found   : 7
+2026-03-16 06:36:07 [INFO   ]   New in DB       : 7
+2026-03-16 06:36:07 [INFO   ]   (already marked): 0
+2026-03-16 06:36:07 [INFO   ] ============================================================
+2026-03-16 06:36:07 [INFO   ] 
+  Next send run will automatically skip bounced formats
+2026-03-16 06:36:07 [INFO   ]   and try the next email format for those contacts.
+2026-03-16 06:36:07 [INFO   ] 
+  Contacts to retry (7):
+2026-03-16 06:36:07 [INFO   ]     Johannes Kattus @ amhof8.com  (bounced: firstname.lastname)
+2026-03-16 06:36:07 [INFO   ]     Constanze Matuschka @ amhof8.com  (bounced: firstname.lastname)
+2026-03-16 06:36:07 [INFO   ]     Natascha Maria Quester @ amhof8.com  (bounced: firstname.lastname)
+2026-03-16 06:36:07 [INFO   ]     Nicole Schmalzbauer @ amhof8.com  (bounced: firstname.lastname)
+2026-03-16 06:36:07 [INFO   ]     Shahed Latif @ arena-international.com  (bounced: firstname.lastname)
+2026-03-16 06:36:07 [INFO   ]     Adriano Messina @ benq.eu  (bounced: firstname.lastname)
+2026-03-16 06:36:07 [INFO   ]     Dennis Jansen @ benq.eu  (bounced: firstname.lastname)
+2026-03-16 11:04:49 [INFO   ] ============================================================
+2026-03-16 11:04:49 [INFO   ]   BOUNCE CHECKER
+2026-03-16 11:04:49 [INFO   ]   Run: 2026-03-16 11:04:49
+2026-03-16 11:04:49 [INFO   ] ============================================================
+2026-03-16 11:04:49 [INFO   ]   10 Gmail account(s) to check
+2026-03-16 11:04:49 [INFO   ]   52 sent email addresses in DB
+2026-03-16 11:04:49 [INFO   ] 
+  Checking: jain106sandeep@gmail.com
+2026-03-16 11:04:49 [INFO   ]   Connecting to jain106sandeep@gmail.com...
+2026-03-16 11:04:53 [INFO   ]   Found 156 potential bounce email(s)
+2026-03-16 11:06:04 [INFO   ]   📧 Bounce detected: adriana.pirvu@adriana-reinigungsservice.at
+2026-03-16 11:06:16 [INFO   ]   📧 Bounce detected: aqueel.akhtar@h-a-m.at
+2026-03-16 11:06:31 [INFO   ]   📧 Bounce detected: heidrun.raab@eskagloves.com
+2026-03-16 11:06:32 [INFO   ]   ✓ Marked bounced: adriana.pirvu@adriana-reinigungsservice.at
+2026-03-16 11:06:32 [INFO   ]   ✓ Marked bounced: aqueel.akhtar@h-a-m.at
+2026-03-16 11:06:32 [INFO   ]   ✓ Marked bounced: heidrun.raab@eskagloves.com
+2026-03-16 11:06:32 [INFO   ] 
+  Checking: sj1799274@gmail.com
+2026-03-16 11:06:32 [INFO   ]   Connecting to sj1799274@gmail.com...
+2026-03-16 11:06:35 [INFO   ]   Found 64 potential bounce email(s)
+2026-03-16 11:07:04 [INFO   ] 
+  Checking: jain109sandeep@gmail.com
+2026-03-16 11:07:04 [INFO   ]   Connecting to jain109sandeep@gmail.com...
+2026-03-16 11:07:10 [INFO   ]   Found 273 potential bounce email(s)
+2026-03-16 11:07:28 [INFO   ]   📧 Bounce detected: frans.jan@h-a-m.at
+2026-03-16 11:09:55 [INFO   ]   📧 Bounce detected: gencay.cakmak@cyberith.com
+2026-03-16 11:10:16 [INFO   ]   ✓ Marked bounced: frans.jan@h-a-m.at
+2026-03-16 11:10:16 [INFO   ]   ✓ Marked bounced: gencay.cakmak@cyberith.com
+2026-03-16 11:10:16 [INFO   ] 
+  Checking: jain111sandeep@gmail.com
+2026-03-16 11:10:16 [INFO   ]   Connecting to jain111sandeep@gmail.com...
+2026-03-16 11:10:19 [INFO   ]   Found 98 potential bounce email(s)
+2026-03-16 11:10:58 [INFO   ]   📧 Bounce detected: christoph.fink@garten-hoedl.at
+2026-03-16 11:11:00 [INFO   ]   ✓ Marked bounced: christoph.fink@garten-hoedl.at
+2026-03-16 11:11:00 [INFO   ] 
+  Checking: sandeep196605@gmail.com
+2026-03-16 11:11:00 [INFO   ]   Connecting to sandeep196605@gmail.com...
+2026-03-16 11:11:04 [INFO   ]   Found 108 potential bounce email(s)
+2026-03-16 11:11:36 [INFO   ]   📧 Bounce detected: patrick.bierwolf@goettinger.com
+2026-03-16 11:12:03 [INFO   ]   ✓ Marked bounced: patrick.bierwolf@goettinger.com
+2026-03-16 11:12:03 [INFO   ] 
+  Checking: jain114sandeep@gmail.com
+2026-03-16 11:12:03 [INFO   ]   Connecting to jain114sandeep@gmail.com...
+2026-03-16 11:12:07 [INFO   ]   Found 91 potential bounce email(s)
+2026-03-16 11:12:43 [INFO   ]   📧 Bounce detected: elimane.hamidine@h-a-m.at
+2026-03-16 11:12:56 [INFO   ]   ✓ Marked bounced: elimane.hamidine@h-a-m.at
+2026-03-16 11:12:56 [INFO   ] 
+  Checking: jain105sandeep@gmail.com
+2026-03-16 11:12:56 [INFO   ]   Connecting to jain105sandeep@gmail.com...
+2026-03-16 11:12:59 [INFO   ]   Found 201 potential bounce email(s)
+2026-03-16 11:13:17 [INFO   ]   📧 Bounce detected: michael.wysocki@fristads.com
+2026-03-16 11:14:06 [INFO   ]   📧 Bounce detected: mamadou.hamat@h-a-m.at
+2026-03-16 11:14:24 [INFO   ]   📧 Bounce detected: janine.johara@cyberith.com
+2026-03-16 11:14:27 [INFO   ]   ✓ Marked bounced: michael.wysocki@fristads.com
+2026-03-16 11:14:27 [INFO   ]   ✓ Marked bounced: mamadou.hamat@h-a-m.at
+2026-03-16 11:14:27 [INFO   ]   ✓ Marked bounced: janine.johara@cyberith.com
+2026-03-16 11:14:27 [INFO   ] 
+  Checking: jain107sandeep@gmail.com
+2026-03-16 11:14:27 [INFO   ]   Connecting to jain107sandeep@gmail.com...
+2026-03-16 11:14:28 [ERROR  ]   IMAP error for jain107sandeep@gmail.com: b'[AUTHENTICATIONFAILED] Invalid credentials (Failure)'
+2026-03-16 11:14:28 [INFO   ] 
+  Checking: sj7634811@gmail.com
+2026-03-16 11:14:28 [INFO   ]   Connecting to sj7634811@gmail.com...
+2026-03-16 11:14:32 [INFO   ]   Found 234 potential bounce email(s)
+2026-03-16 11:15:14 [INFO   ]   📧 Bounce detected: adem.yavuz@eskagloves.com
+2026-03-16 11:16:26 [INFO   ]   ✓ Marked bounced: adem.yavuz@eskagloves.com
+2026-03-16 11:16:26 [INFO   ] 
+  Checking: jain115sandeep@gmail.com
+2026-03-16 11:16:26 [INFO   ]   Connecting to jain115sandeep@gmail.com...
+2026-03-16 11:16:30 [INFO   ]   Found 0 potential bounce email(s)
+2026-03-16 11:16:30 [INFO   ] 
+============================================================
+2026-03-16 11:16:30 [INFO   ]   Bounces found   : 12
+2026-03-16 11:16:30 [INFO   ]   New in DB       : 12
+2026-03-16 11:16:30 [INFO   ]   (already marked): 0
+2026-03-16 11:16:30 [INFO   ] ============================================================
+2026-03-16 11:16:30 [INFO   ] 
+  Next send run will automatically skip bounced formats
+2026-03-16 11:16:30 [INFO   ]   and try the next email format for those contacts.
+2026-03-16 11:16:30 [INFO   ] 
+  Contacts to retry (19):
+2026-03-16 11:16:30 [INFO   ]     Adriana Pirvu @ adriana-reinigungsservice.at  (bounced: firstname.lastname)
+2026-03-16 11:16:30 [INFO   ]     Johannes Kattus @ amhof8.com  (bounced: firstname.lastname)
+2026-03-16 11:16:30 [INFO   ]     Constanze Matuschka @ amhof8.com  (bounced: firstname.lastname)
+2026-03-16 11:16:30 [INFO   ]     Natascha Maria Quester @ amhof8.com  (bounced: firstname.lastname)
+2026-03-16 11:16:30 [INFO   ]     Nicole Schmalzbauer @ amhof8.com  (bounced: firstname.lastname)
+2026-03-16 11:16:30 [INFO   ]     Shahed Latif @ arena-international.com  (bounced: firstname.lastname)
+2026-03-16 11:16:30 [INFO   ]     Adriano Messina @ benq.eu  (bounced: firstname.lastname)
+2026-03-16 11:16:30 [INFO   ]     Dennis Jansen @ benq.eu  (bounced: firstname.lastname)
+2026-03-16 11:16:30 [INFO   ]     Gencay Cakmak @ cyberith.com  (bounced: firstname.lastname)
+2026-03-16 11:16:30 [INFO   ]     Janine Johara Jägers @ cyberith.com  (bounced: firstname.lastname)
+2026-03-16 11:16:30 [INFO   ]     Patrick Bierwolf @ goettinger.com  (bounced: firstname.lastname)
+2026-03-16 11:16:30 [INFO   ]     Adem Yavuz @ eskagloves.com  (bounced: firstname.lastname)
+2026-03-16 11:16:30 [INFO   ]     Heidrun Raab @ eskagloves.com  (bounced: firstname.lastname)
+2026-03-16 11:16:30 [INFO   ]     Michael Wysocki @ fristads.com  (bounced: firstname.lastname)
+2026-03-16 11:16:30 [INFO   ]     Christoph Fink B. Eng. @ garten-hoedl.at  (bounced: firstname.lastname)
+2026-03-16 11:16:30 [INFO   ]     Aqueel Akhtar @ h-a-m.at  (bounced: firstname.lastname)
+2026-03-16 11:16:30 [INFO   ]     Elimane Hamidine SY @ h-a-m.at  (bounced: firstname.lastname)
+2026-03-16 11:16:30 [INFO   ]     Frans Jan Soede @ h-a-m.at  (bounced: firstname.lastname)
+2026-03-16 11:16:30 [INFO   ]     Mamadou Hamat Wane @ h-a-m.at  (bounced: firstname.lastname)
+2026-03-21 15:21:47 [INFO   ] ============================================================
+2026-03-21 15:21:47 [INFO   ]   BOUNCE CHECKER
+2026-03-21 15:21:47 [INFO   ]   Run: 2026-03-21 15:21:47
+2026-03-21 15:21:47 [INFO   ] ============================================================
+2026-03-21 15:21:47 [INFO   ]   10 Gmail account(s) to check
+2026-03-21 15:21:47 [INFO   ]   69 sent email addresses in DB
+2026-03-21 15:21:47 [INFO   ] 
+  Checking: jain106sandeep@gmail.com
+2026-03-21 15:21:47 [INFO   ]   Connecting to jain106sandeep@gmail.com...
+2026-03-21 15:21:52 [INFO   ]   Found 176 potential bounce email(s)
+2026-03-21 15:21:56 [INFO   ]   📧 Bounce detected: anca.andreea@3dmensionals.de
+2026-03-21 15:22:26 [INFO   ]   📧 Bounce detected: olfa.reyes@lifestylehotels.net
+2026-03-21 15:22:49 [INFO   ]   📧 Bounce detected: michael.matzner@mikka.com
+2026-03-21 15:22:52 [INFO   ]   📧 Bounce detected: anca.andreea@3dmensionals.de
+2026-03-21 15:23:12 [INFO   ]   📧 Bounce detected: anca.andreea@3dmensionals.de
+2026-03-21 15:23:33 [INFO   ]   📧 Bounce detected: yavor.mitev@meavo.com
+2026-03-21 15:23:43 [INFO   ]   ✓ Marked bounced: anca.andreea@3dmensionals.de
+2026-03-21 15:23:43 [INFO   ]   ✓ Marked bounced: olfa.reyes@lifestylehotels.net
+2026-03-21 15:23:43 [INFO   ]   ✓ Marked bounced: michael.matzner@mikka.com
+2026-03-21 15:23:43 [INFO   ]   ⏭️  Already marked: anca.andreea@3dmensionals.de
+2026-03-21 15:23:43 [INFO   ]   ⏭️  Already marked: anca.andreea@3dmensionals.de
+2026-03-21 15:23:43 [INFO   ]   ✓ Marked bounced: yavor.mitev@meavo.com
+2026-03-21 15:23:43 [INFO   ] 
+  Checking: sj1799274@gmail.com
+2026-03-21 15:23:43 [INFO   ]   Connecting to sj1799274@gmail.com...
+2026-03-21 15:23:46 [INFO   ]   Found 64 potential bounce email(s)
+2026-03-21 15:24:20 [INFO   ] 
+  Checking: jain109sandeep@gmail.com
+2026-03-21 15:24:20 [INFO   ]   Connecting to jain109sandeep@gmail.com...
+2026-03-21 15:24:25 [INFO   ]   Found 294 potential bounce email(s)
+2026-03-21 15:24:41 [INFO   ]   📧 Bounce detected: frank.moskopp@3dmensionals.de
+2026-03-21 15:25:22 [INFO   ]   📧 Bounce detected: frank.moskopp@3dmensionals.de
+2026-03-21 15:25:29 [INFO   ]   📧 Bounce detected: tim.van@lueftner-cruises.com
+2026-03-21 15:26:13 [INFO   ]   📧 Bounce detected: frank.moskopp@3dmensionals.de
+2026-03-21 15:26:26 [INFO   ]   📧 Bounce detected: andreia.lopes@mond.com
+2026-03-21 15:26:36 [INFO   ]   📧 Bounce detected: george.gesek@novarion.systems
+2026-03-21 15:27:24 [INFO   ]   ✓ Marked bounced: frank.moskopp@3dmensionals.de
+2026-03-21 15:27:24 [INFO   ]   ⏭️  Already marked: frank.moskopp@3dmensionals.de
+2026-03-21 15:27:24 [INFO   ]   ✓ Marked bounced: tim.van@lueftner-cruises.com
+2026-03-21 15:27:24 [INFO   ]   ⏭️  Already marked: frank.moskopp@3dmensionals.de
+2026-03-21 15:27:24 [INFO   ]   ✓ Marked bounced: andreia.lopes@mond.com
+2026-03-21 15:27:24 [INFO   ]   ✓ Marked bounced: george.gesek@novarion.systems
+2026-03-21 15:27:24 [INFO   ] 
+  Checking: jain111sandeep@gmail.com
+2026-03-21 15:27:24 [INFO   ]   Connecting to jain111sandeep@gmail.com...
+2026-03-21 15:27:27 [INFO   ]   Found 109 potential bounce email(s)
+2026-03-21 15:27:46 [INFO   ]   📧 Bounce detected: thomas.holzleithner@lifestylehotels.net
+2026-03-21 15:27:48 [INFO   ]   📧 Bounce detected: danyal.sleman@novarion.systems
+2026-03-21 15:28:11 [INFO   ]   📧 Bounce detected: michael.kirchberger@mikka.com
+2026-03-21 15:28:12 [INFO   ]   📧 Bounce detected: adel.hafizovic@neoh.com
+2026-03-21 15:28:14 [INFO   ]   📧 Bounce detected: vojtech.kucera@meavo.com
+2026-03-21 15:28:15 [INFO   ]   ✓ Marked bounced: thomas.holzleithner@lifestylehotels.net
+2026-03-21 15:28:15 [INFO   ]   ✓ Marked bounced: danyal.sleman@novarion.systems
+2026-03-21 15:28:15 [INFO   ]   ✓ Marked bounced: michael.kirchberger@mikka.com
+2026-03-21 15:28:15 [INFO   ]   ✓ Marked bounced: adel.hafizovic@neoh.com
+2026-03-21 15:28:15 [INFO   ]   ✓ Marked bounced: vojtech.kucera@meavo.com
+2026-03-21 15:28:15 [INFO   ] 
+  Checking: sandeep196605@gmail.com
+2026-03-21 15:28:15 [INFO   ]   Connecting to sandeep196605@gmail.com...
+2026-03-21 15:28:20 [INFO   ]   Found 122 potential bounce email(s)
+2026-03-21 15:28:35 [INFO   ]   📧 Bounce detected: dimitar.zhelev@meavo.com
+2026-03-21 15:28:40 [INFO   ]   📧 Bounce detected: eva.krieger@mikka.com
+2026-03-21 15:28:44 [INFO   ]   📧 Bounce detected: daniel.fisher@mond.com
+2026-03-21 15:28:48 [INFO   ]   📧 Bounce detected: hardy.egger@lifestylehotels.net
+2026-03-21 15:29:37 [INFO   ]   ✓ Marked bounced: dimitar.zhelev@meavo.com
+2026-03-21 15:29:37 [INFO   ]   ✓ Marked bounced: eva.krieger@mikka.com
+2026-03-21 15:29:37 [INFO   ]   ✓ Marked bounced: daniel.fisher@mond.com
+2026-03-21 15:29:37 [INFO   ]   ✓ Marked bounced: hardy.egger@lifestylehotels.net
+2026-03-21 15:29:37 [INFO   ] 
+  Checking: jain114sandeep@gmail.com
+2026-03-21 15:29:37 [INFO   ]   Connecting to jain114sandeep@gmail.com...
+2026-03-21 15:29:42 [INFO   ]   Found 105 potential bounce email(s)
+2026-03-21 15:29:46 [INFO   ]   📧 Bounce detected: lukas.windbrechtinger@miind.at
+2026-03-21 15:29:52 [INFO   ]   📧 Bounce detected: thorsten.schmitt@lueftner-cruises.com
+2026-03-21 15:30:05 [INFO   ]   📧 Bounce detected: alex.siebert@mond.com
+2026-03-21 15:30:21 [INFO   ]   📧 Bounce detected: felix.hallen@3dmensionals.de
+2026-03-21 15:30:25 [INFO   ]   📧 Bounce detected: eugen.lippert@neoh.com
+2026-03-21 15:30:51 [INFO   ]   📧 Bounce detected: felix.hallen@3dmensionals.de
+2026-03-21 15:30:52 [INFO   ]   📧 Bounce detected: felix.hallen@3dmensionals.de
+2026-03-21 15:30:55 [INFO   ]   ✓ Marked bounced: lukas.windbrechtinger@miind.at
+2026-03-21 15:30:55 [INFO   ]   ✓ Marked bounced: thorsten.schmitt@lueftner-cruises.com
+2026-03-21 15:30:55 [INFO   ]   ✓ Marked bounced: alex.siebert@mond.com
+2026-03-21 15:30:55 [INFO   ]   ✓ Marked bounced: felix.hallen@3dmensionals.de
+2026-03-21 15:30:55 [INFO   ]   ✓ Marked bounced: eugen.lippert@neoh.com
+2026-03-21 15:30:55 [INFO   ]   ⏭️  Already marked: felix.hallen@3dmensionals.de
+2026-03-21 15:30:55 [INFO   ]   ⏭️  Already marked: felix.hallen@3dmensionals.de
+2026-03-21 15:30:55 [INFO   ] 
+  Checking: jain105sandeep@gmail.com
+2026-03-21 15:30:55 [INFO   ]   Connecting to jain105sandeep@gmail.com...
+2026-03-21 15:30:58 [INFO   ]   Found 216 potential bounce email(s)
+2026-03-21 15:32:19 [INFO   ]   📧 Bounce detected: ana.aleksandrov@novarion.systems
+2026-03-21 15:32:43 [INFO   ]   📧 Bounce detected: benjamin.nick@mond.com
+2026-03-21 15:32:46 [INFO   ]   ✓ Marked bounced: ana.aleksandrov@novarion.systems
+2026-03-21 15:32:46 [INFO   ]   ✓ Marked bounced: benjamin.nick@mond.com
+2026-03-21 15:32:46 [INFO   ] 
+  Checking: jain107sandeep@gmail.com
+2026-03-21 15:32:46 [INFO   ]   Connecting to jain107sandeep@gmail.com...
+2026-03-21 15:32:48 [ERROR  ]   IMAP error for jain107sandeep@gmail.com: b'[AUTHENTICATIONFAILED] Invalid credentials (Failure)'
+2026-03-21 15:32:48 [INFO   ] 
+  Checking: sj7634811@gmail.com
+2026-03-21 15:32:48 [INFO   ]   Connecting to sj7634811@gmail.com...
+2026-03-21 15:32:51 [INFO   ]   Found 246 potential bounce email(s)
+2026-03-21 15:33:58 [INFO   ]   📧 Bounce detected: sabina.riemer@lifestylehotels.net
+2026-03-21 15:34:18 [INFO   ]   📧 Bounce detected: christoph.chvatal@novarion.systems
+2026-03-21 15:34:26 [INFO   ]   📧 Bounce detected: magda.koukol@mikka.com
+2026-03-21 15:34:34 [INFO   ]   📧 Bounce detected: kristian.tranders@mond.com
+2026-03-21 15:34:42 [INFO   ]   ✓ Marked bounced: sabina.riemer@lifestylehotels.net
+2026-03-21 15:34:42 [INFO   ]   ✓ Marked bounced: christoph.chvatal@novarion.systems
+2026-03-21 15:34:42 [INFO   ]   ✓ Marked bounced: magda.koukol@mikka.com
+2026-03-21 15:34:42 [INFO   ]   ✓ Marked bounced: kristian.tranders@mond.com
+2026-03-21 15:34:42 [INFO   ] 
+  Checking: jain115sandeep@gmail.com
+2026-03-21 15:34:42 [INFO   ]   Connecting to jain115sandeep@gmail.com...
+2026-03-21 15:34:47 [INFO   ]   Found 0 potential bounce email(s)
+2026-03-21 15:34:47 [INFO   ] 
+============================================================
+2026-03-21 15:34:47 [INFO   ]   Bounces found   : 34
+2026-03-21 15:34:47 [INFO   ]   New in DB       : 28
+2026-03-21 15:34:47 [INFO   ]   (already marked): 6
+2026-03-21 15:34:47 [INFO   ] ============================================================
+2026-03-21 15:34:47 [INFO   ] 
+  Next send run will automatically skip bounced formats
+2026-03-21 15:34:47 [INFO   ]   and try the next email format for those contacts.
+2026-03-21 15:34:47 [INFO   ] 
+  Contacts to retry (47):
+2026-03-21 15:34:47 [INFO   ]     Anca Andreea Rădulescu @ 3dmensionals.de  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Felix Hallen @ 3dmensionals.de  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Frank Moskopp @ 3dmensionals.de  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Adriana Pirvu @ adriana-reinigungsservice.at  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Johannes Kattus @ amhof8.com  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Constanze Matuschka @ amhof8.com  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Natascha Maria Quester @ amhof8.com  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Nicole Schmalzbauer @ amhof8.com  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Shahed Latif @ arena-international.com  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Adriano Messina @ benq.eu  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Dennis Jansen @ benq.eu  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Gencay Cakmak @ cyberith.com  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Janine Johara Jägers @ cyberith.com  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Patrick Bierwolf @ goettinger.com  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Adem Yavuz @ eskagloves.com  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Heidrun Raab @ eskagloves.com  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Michael Wysocki @ fristads.com  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Christoph Fink B. Eng. @ garten-hoedl.at  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Aqueel Akhtar @ h-a-m.at  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Elimane Hamidine SY @ h-a-m.at  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Frans Jan Soede @ h-a-m.at  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Mamadou Hamat Wane @ h-a-m.at  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Hardy Egger @ lifestylehotels.net  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Sabina Riemer @ lifestylehotels.net  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Thomas Holzleithner @ lifestylehotels.net  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Olfa Reyes @ lifestylehotels.net  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Thorsten Schmitt @ lueftner-cruises.com  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Tim van Bladel @ lueftner-cruises.com  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Dimitar Zhelev @ meavo.com  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Vojtech Kucera @ meavo.com  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Yavor Mitev @ meavo.com  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Lukas Windbrechtinger @ miind.at  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Eva Krieger @ mikka.com  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Magda Koukol @ mikka.com  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Michael Kirchberger @ mikka.com  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Michael Matzner @ mikka.com  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Alex Siebert @ mond.com  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Andreia Lopes Vaz Patto @ mond.com  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Benjamin Nick Hugenschmidt @ mond.com  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Daniel Fisher @ mond.com  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Kristian Tranders @ mond.com  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Adel Hafizovic @ neoh.com  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Eugen Lippert @ neoh.com  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     George Gesek @ novarion.systems  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Ana Aleksandrov @ novarion.systems  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Christoph Chvatal @ novarion.systems  (bounced: firstname.lastname)
+2026-03-21 15:34:47 [INFO   ]     Danyal sleman @ novarion.systems  (bounced: firstname.lastname)
