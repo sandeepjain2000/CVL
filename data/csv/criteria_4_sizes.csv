@@ -1,0 +1,9 @@
+size_label,size_code,active,notes
+1-10 employees,B,0,Excluded as per requirement
+11-50 employees,C,1,
+51-200 employees,D,1,
+201-500 employees,E,1,
+501-1000 employees,F,1,
+1001-5000 employees,G,1,
+5001-10000 employees,H,1,
+10001+ employees,I,1,

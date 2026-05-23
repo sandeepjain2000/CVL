@@ -1,5 +1,5 @@
 """
-linkedin_scraper.py  –  v4.0
+linkedin_scraper.py  –  v4.2
 ==============================
 Production-ready LinkedIn scraper using Playwright (Firefox).
 
@@ -46,22 +46,79 @@ Usage
   pip install playwright
   playwright install firefox
   python linkedin_scraper.py
+  python linkedin_scraper.py --test    # 1 company, 1 employee (also --Test, --TEST)
 """
 
+import argparse
 import asyncio
+import sys
 import csv
 import logging
 import random
 import re
 import shutil
 import sqlite3
+import time
+import winsound
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Generator
 from urllib.parse import urlparse, quote
 
+# ---------------------------------------------------------------------------
+# AUDIO ALERTS  —  Windows beeps at key script events
+# ---------------------------------------------------------------------------
+def beep_ok() -> None:
+    """Short high beep — company saved OK."""
+    winsound.Beep(1000, 200)   # 1000 Hz, 200 ms
+
+def beep_error() -> None:
+    """Low double-beep — error on a company."""
+    winsound.Beep(400, 300)    # 400 Hz, 300 ms
+    winsound.Beep(300, 400)    # 300 Hz, 400 ms
+
+def beep_done() -> None:
+    """Rising triple beep — entire run finished."""
+    winsound.Beep(600, 200)
+    winsound.Beep(900, 200)
+    winsound.Beep(1200, 400)
+
+
+# ---------------------------------------------------------------------------
+# WINDOWS SLEEP PREVENTION  —  keeps script running by preventing idle sleep
+# ---------------------------------------------------------------------------
+@contextmanager
+def prevent_windows_sleep() -> Generator[None, None, None]:
+    """
+    Context manager to prevent Windows from entering sleep mode (system suspend)
+    due to inactivity while the scraper is running. The display is still
+    allowed to turn off normally.
+    """
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ES_CONTINUOUS = 0x80000000
+            ES_SYSTEM_REQUIRED = 0x00000001
+            logger.info("Setting Windows thread execution state to prevent sleep...")
+            ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+            yield
+        except Exception as e:
+            logger.warning("Could not set Windows execution state to prevent sleep: %s", e)
+            yield
+        finally:
+            logger.info("Restoring Windows sleep behavior...")
+            try:
+                import ctypes
+                ES_CONTINUOUS = 0x80000000
+                ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+            except Exception as e:
+                logger.error("Failed to restore Windows sleep state: %s", e)
+    else:
+        yield
+
 from playwright.async_api import (
+    Error as PlaywrightError,
     async_playwright,
     BrowserContext,
     Page,
@@ -72,12 +129,16 @@ from playwright.async_api import (
 # ---------------------------------------------------------------------------
 # LOGGING
 # ---------------------------------------------------------------------------
+LOG_DIR = Path(__file__).parent / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOG_DIR / "linkedin_scraper.log"
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("linkedin_scraper.log", encoding="utf-8"),
+        logging.FileHandler(str(LOG_FILE), encoding="utf-8"),
     ],
 )
 logger = logging.getLogger(__name__)
@@ -85,8 +146,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # FILE PATHS
 # ---------------------------------------------------------------------------
-SESSION_FILE    = "linkedin_state.json"
-DB_FILE         = "linkedin_data.db"
+SESSION_FILE    = str((Path(__file__).parent / "data" / "json" / "linkedin_state.json"))
+DB_FILE         = str((Path(__file__).parent / "data" / "db" / "linkedin_data.db"))
+Path(SESSION_FILE).parent.mkdir(parents=True, exist_ok=True)
+Path(DB_FILE).parent.mkdir(parents=True, exist_ok=True)
 
 # Your REAL Firefox profile — cookies are read from here (never written back)
 FIREFOX_PROFILE_DIR    = (
@@ -99,26 +162,37 @@ PLAYWRIGHT_PROFILE_DIR = r"C:\Users\sandeep\AppData\Local\linkedin_scraper_profi
 # ---------------------------------------------------------------------------
 # SCRAPING BEHAVIOUR  —  tune these to balance speed vs. block risk
 # ---------------------------------------------------------------------------
-DELAY_SHORT  = (2.0, 4.0)    # between UI actions within a page
-DELAY_MEDIUM = (4.0, 8.0)    # between pages within one combination
-DELAY_LONG   = (8.0, 15.0)   # after errors / retries
+DELAY_SHORT  = (2.5, 5.5)    # between UI actions within a page
+DELAY_MEDIUM = (4.0, 8.0)   # between pages within one combination
+DELAY_LONG   = (10.0, 15.0)  # after errors / retries
 
 # Delay BETWEEN search combinations — critical for avoiding blocks.
 # LinkedIn will rate-limit if you hammer many different filter combos
 # in quick succession.  Keep this at 30-60 s minimum in production.
-DELAY_BETWEEN_COMBOS = (60.0, 120.0)  # seconds — longer gap reduces bot detection
+DELAY_BETWEEN_COMBOS = (30.0, 60.0)  # seconds — longer gap reduces bot detection
+
+# After each company is fully scraped (profile + about + employees saved).
+DELAY_BETWEEN_COMPANIES = (10.0, 20.0)
+
+# Pause between each employee card while parsing the /people/ DOM (not used for API path).
+DELAY_BETWEEN_EMPLOYEE_CARDS = (0.45, 1.35)
 
 # How many search combinations to attempt per run.
 # Each combination = one (country × industry × size) trio.
 # Keep low (1-3) while testing; raise to 5-10 for production runs.
-MAX_COMBOS_PER_RUN  = 20
+MAX_COMBOS_PER_RUN  = 30
 
 # How many NEW companies to collect before stopping for this run.
-MAX_COMPANIES_PER_RUN = 50     # ← raise for production (e.g. 50 or 200)
+MAX_COMPANIES_PER_RUN = 100    # ← raise for production (e.g. 50 or 200)
 
 # How many LinkedIn result pages to fetch per combination (10 results/page).
 # 10 pages = up to 100 companies per combination.
 MAX_PAGES_PER_COMBO   = 10
+
+# Max employees saved per company (API and DOM paths).
+MAX_EMPLOYEES_PER_COMPANY = 10
+
+TEST_MODE = False
 
 # ── LinkedIn geoUrn IDs for country-level location filtering ─────────────────
 GEO_URN_MAP: dict[str, str] = {
@@ -185,7 +259,8 @@ GEO_URN_MAP: dict[str, str] = {
 # copy the industryCompanyVertical value from the URL, paste it in the CSV.
 # ---------------------------------------------------------------------------
 
-CRITERIA_DIR = Path(__file__).parent   # same folder as this script
+CRITERIA_DIR = Path(__file__).parent / "data" / "csv"
+CRITERIA_DIR.mkdir(parents=True, exist_ok=True)
 
 def _load_criteria_csv(filename: str) -> list[dict]:
     """Read a criteria CSV and return list of dicts. Skips header row."""
@@ -233,14 +308,95 @@ def now_ts() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-async def sleep_rand(low: float, high: float) -> None:
-    await asyncio.sleep(random.uniform(low, high))
+async def sleep_rand(low: float, high: float, label: str = "") -> None:
+    """
+    Sleep for a random duration between low and high seconds.
+    Broken into 1-second ticks so Windows timer throttling cannot
+    stretch a short sleep into minutes when the window loses focus.
+    """
+    total = random.uniform(low, high)
+    elapsed = 0.0
+    tick = 1.0          # maximum chunk size (seconds)
+    log_every = 30.0    # heartbeat interval
+    last_heartbeat = 0.0
+    while elapsed < total:
+        chunk = min(tick, total - elapsed)
+        await asyncio.sleep(chunk)
+        elapsed += chunk
+        last_heartbeat += chunk
+        if last_heartbeat >= log_every:
+            remaining = total - elapsed
+            tag = f" [{label}]" if label else ""
+            logger.debug("  ⏳ Waiting… %.0fs elapsed, %.0fs remaining%s", elapsed, remaining, tag)
+            last_heartbeat = 0.0
+
+
+def _transient_page_error(exc: BaseException) -> bool:
+    """True when LinkedIn navigated/redirected mid-action (common after goto)."""
+    msg = str(exc).lower()
+    return (
+        "execution context was destroyed" in msg
+        or "target page, context or browser has been closed" in msg
+        or "has been closed" in msg
+        or "navigation" in msg
+    )
+
+
+async def wait_page_settled(page: Page, timeout_ms: int = 30_000) -> None:
+    """Wait for redirects to finish before mouse/scroll (feed often navigates twice)."""
+    try:
+        await page.wait_for_load_state("load", timeout=timeout_ms)
+    except PlaywrightError:
+        pass
+    try:
+        await page.wait_for_load_state("domcontentloaded", timeout=5_000)
+    except PlaywrightError:
+        pass
+    await sleep_rand(0.35, 0.85)
+
+
+async def maybe_mouse_drift(page: Page) -> None:
+    """Small, slow pointer movement — breaks perfect scroll-only automation."""
+    if random.random() > 0.42:
+        return
+    vp = page.viewport_size
+    if not vp:
+        return
+    margin = 100
+    x = random.randint(margin, max(margin + 1, vp["width"] - margin))
+    y = random.randint(margin, max(margin + 1, vp["height"] - margin))
+    try:
+        await page.mouse.move(
+            x + random.randint(-40, 40),
+            y + random.randint(-25, 25),
+            steps=random.randint(10, 26),
+        )
+    except PlaywrightError as exc:
+        if _transient_page_error(exc):
+            return
+        raise
 
 
 async def human_scroll(page: Page, steps: int = 5) -> None:
-    for _ in range(steps):
-        await page.mouse.wheel(0, random.randint(200, 600))
-        await asyncio.sleep(random.uniform(0.3, 0.9))
+    """Slower, chunkier scrolls with occasional slight reverse (re-read) pauses."""
+    for i in range(steps):
+        if random.random() < 0.14:
+            await maybe_mouse_drift(page)
+        delta = random.randint(70, 210)
+        if random.random() < 0.11:
+            delta = -random.randint(35, 110)
+        try:
+            await page.mouse.wheel(0, delta)
+        except PlaywrightError as exc:
+            if _transient_page_error(exc):
+                logger.debug("human_scroll: page navigated during scroll — stopping early")
+                return
+            raise
+        await sleep_rand(0.55, 1.75)
+        if random.random() < 0.2:
+            await sleep_rand(0.35, 1.15)
+        if i > 0 and random.random() < 0.08:
+            await sleep_rand(0.25, 0.9)
 
 
 def extract_domain(raw_url: str) -> str:
@@ -547,6 +703,88 @@ def update_combination(conn: sqlite3.Connection, combo_id: int,
         """, (status, last_page, total_found, now_ts(), combo_id))
 
 
+def verify_search_combinations_table(conn: sqlite3.Connection) -> bool:
+    """
+    Confirm the combination queue table exists and log how many rows are
+  available for get_next_combination() (pending + in_progress).
+    """
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='search_combinations'"
+    ).fetchone()
+    if not row:
+        logger.error(
+            "Table search_combinations is missing — run init_db() / check SCHEMA."
+        )
+        return False
+
+    counts = dict(
+        conn.execute(
+            "SELECT status, COUNT(*) FROM search_combinations GROUP BY status"
+        ).fetchall()
+    )
+    actionable = counts.get("pending", 0) + counts.get("in_progress", 0)
+    logger.info(
+        "Combination queue (search_combinations): %d actionable "
+        "(pending=%d, in_progress=%d) | exhausted=%d | total=%d",
+        actionable,
+        counts.get("pending", 0),
+        counts.get("in_progress", 0),
+        counts.get("exhausted", 0),
+        sum(counts.values()),
+    )
+    if actionable == 0:
+        logger.warning(
+            "No pending or in_progress combinations — discovery will not run. "
+            "Activate criteria in DB/CSV and call build_combinations(), or reset "
+            "exhausted rows to pending if you want to re-scan."
+        )
+    return True
+
+
+def recover_stale_combinations(conn: sqlite3.Connection) -> int:
+    """
+    Mark in_progress rows that already finished all pages as exhausted so
+    get_next_combination() can advance to the next queue entry.
+    """
+    with db_cursor(conn) as cur:
+        cur.execute(
+            """
+            UPDATE search_combinations
+            SET    status='exhausted', updated_at=?
+            WHERE  status='in_progress' AND last_page >= ?
+            """,
+            (now_ts(), MAX_PAGES_PER_COMBO),
+        )
+        n = cur.rowcount
+    if n:
+        logger.info(
+            "Recovered %d stale in_progress combination(s) → exhausted.", n
+        )
+    return n
+
+
+def finalize_combination_status(
+    *,
+    exhausted: bool,
+    last_page: int,
+    added_this_combo: int,
+    stopped_for_company_cap: bool,
+) -> str:
+    """
+    Decide how to mark the current row in search_combinations.
+
+    in_progress — only when this run stopped mid-combo (company cap); resume later.
+    exhausted   — combo finished; get_next_combination() will pick the next row.
+    """
+    if stopped_for_company_cap:
+        return "in_progress"
+    if exhausted or last_page >= MAX_PAGES_PER_COMBO:
+        return "exhausted"
+    if added_this_combo == 0:
+        return "exhausted"
+    return "exhausted"
+
+
 # ===========================================================================
 # COMPANY / EMPLOYEE UPSERT
 # ===========================================================================
@@ -645,8 +883,9 @@ def export_all_csv(conn: sqlite3.Connection) -> None:
          "employees.csv"),
     ]
 
-    for table, fields, path in exports:
+    for table, fields, filename in exports:
         rows = conn.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()
+        path = CRITERIA_DIR / filename
         with open(path, "w", newline="", encoding="utf-8") as fh:
             w = csv.DictWriter(fh, fieldnames=fields, extrasaction="ignore")
             w.writeheader()
@@ -802,6 +1041,44 @@ def _prepare_cookie_only_profile() -> str:
     return str(dest)
 
 
+# ---------------------------------------------------------------------------
+# JS KEEPALIVE  —  injected into every page to defeat browser throttling
+# ---------------------------------------------------------------------------
+# Firefox (and Chrome) throttle JS timers to ≥1000 ms when the page is
+# considered "hidden" (Page Visibility API: document.hidden == true).
+# This happens whenever the window moves behind another app — even though
+# our firefox_user_prefs already set dom.timer.throttling.enabled=False.
+# The prefs are not always honoured in newer Firefox builds.
+#
+# The script below:
+#   1. Overrides document.hidden / visibilityState so the page always
+#      reports "visible" to any JS code (including LinkedIn's own code).
+#   2. Fires a 400ms setInterval that does trivial work — this keeps the
+#      JS timer scheduler "awake" so our asyncio.sleep ticks fire on time.
+# ---------------------------------------------------------------------------
+_JS_KEEPALIVE = """
+(function () {
+  // ── 1. Spoof Page Visibility API ─────────────────────────────────────
+  try {
+    Object.defineProperty(document, 'hidden',           { get: () => false });
+    Object.defineProperty(document, 'visibilityState',  { get: () => 'visible' });
+    Object.defineProperty(document, 'webkitHidden',     { get: () => false });
+    Object.defineProperty(document, 'webkitVisibilityState', { get: () => 'visible' });
+    // Suppress any existing visibilitychange listeners firing "hidden"
+    const _ae = document.addEventListener.bind(document);
+    document.addEventListener = function (type, fn, opts) {
+      if (type === 'visibilitychange') return;  // swallow
+      _ae(type, fn, opts);
+    };
+  } catch (e) {}
+
+  // ── 2. Sub-second heartbeat to keep timer scheduler alive ────────────
+  let _tick = 0;
+  setInterval(function () { _tick = (_tick + 1) & 0x7fffffff; }, 400);
+})();
+"""
+
+
 async def load_or_create_session(playwright: Playwright) -> BrowserContext:
     profile_dir = _prepare_cookie_only_profile()
     context = await playwright.firefox.launch_persistent_context(
@@ -821,16 +1098,44 @@ async def load_or_create_session(playwright: Playwright) -> BrowserContext:
             # Reduce automation fingerprinting
             "privacy.resistFingerprinting": False,
             "dom.webdriver.enabled": False,
+            # ── Fix: dummy HDMI adapter removed → Firefox window goes off-screen
+            # Firefox marks off-screen pages as "hidden" (Page Visibility API)
+            # and throttles ALL timers to ≥1000 ms, causing 60-minute pauses.
+            # These prefs force Firefox to treat every page as foreground.
+            "dom.min_background_timeout_value": 4,
+            "dom.timeout.enable_budget_timer_throttling": False,
+            "dom.min_background_timeout_value_without_budget_throttling": 4,
+            "dom.timer.throttling.enabled": False,
+            # Prevent Firefox from throttling/suspending when window is minimized or covered/occluded
+            "widget.windows.window_occlusion_tracking.enabled": False,
+            "browser.tabs.unloadOnLowMemory": False,
+            # Force window onto primary monitor (0,0) so it is never off-screen
+            "browser.window.left": 0,
+            "browser.window.top": 0,
+            "browser.window.width": 1280,
+            "browser.window.height": 900,
+            "browser.sessionstore.resume_from_crash": False,
         },
     )
+    # Inject keepalive into EVERY page that opens in this context
+    await context.add_init_script(_JS_KEEPALIVE)
+    logger.info("JS keepalive injected into browser context.")
     page = await context.new_page()
-    await page.goto("https://www.linkedin.com/feed/",
-                    wait_until="domcontentloaded", timeout=30_000)
+    await page.bring_to_front()   # ensure window is foregrounded, not treated as hidden
+    await page.goto(
+        "https://www.linkedin.com/feed/",
+        wait_until="load",
+        timeout=30_000,
+    )
+    await wait_page_settled(page)
     await sleep_rand(*DELAY_SHORT)
+    await maybe_mouse_drift(page)
+    await human_scroll(page, steps=random.randint(2, 4))
+    await wait_page_settled(page)
 
-    if "login" in page.url or "authwall" in page.url:
-        logger.warning("Cookies expired — please log in manually.")
-        input("\n>>> Log in to LinkedIn, then press ENTER <<<\n")
+    if "login" in page.url or "authwall" in page.url or "challenge" in page.url:
+        logger.warning("Cookies expired or Captcha hit — please log in manually. Pausing for 3 minutes...")
+        await sleep_rand(180, 180, label="manual-login-wait")   # chunked so OS timer throttle can't freeze it
         await context.storage_state(path=SESSION_FILE)
     else:
         logger.info("LinkedIn session active — no login needed.")
@@ -918,22 +1223,83 @@ async def intercept_api_responses(page) -> None:
 # COMPANY DISCOVERY
 # ===========================================================================
 
+def _normalize_company_url(href: str) -> str | None:
+    if "/company/" not in href:
+        return None
+    clean = re.sub(r"\?.*$", "", href).rstrip("/")
+    if clean.startswith("/"):
+        clean = "https://www.linkedin.com" + clean
+    if re.fullmatch(r"https://www\.linkedin\.com/company/[^/]+", clean):
+        return clean
+    return None
+
+
 async def _collect_urls_from_page(page) -> set:
     """Scrape all top-level /company/ links from the current results page."""
     urls: set = set()
     try:
-        await human_scroll(page, steps=4)
-        for link in await page.query_selector_all("a[href*='/company/']"):
-            href = await link.get_attribute("href") or ""
-            if "/company/" in href:
-                clean = re.sub(r"\?.*$", "", href).rstrip("/")
-                if clean.startswith("/"):
-                    clean = "https://www.linkedin.com" + clean
-                if re.fullmatch(r"https://www\.linkedin\.com/company/[^/]+", clean):
-                    urls.add(clean)
+        await wait_page_settled(page)
+        await sleep_rand(*DELAY_SHORT)
+        await maybe_mouse_drift(page)
+        # Lazy-loaded cards: scroll the results list in passes before collecting.
+        prev_count = -1
+        for _ in range(8):
+            await human_scroll(page, steps=random.randint(3, 5))
+            await sleep_rand(0.7, 1.4)
+            for link in await page.query_selector_all("a[href*='/company/']"):
+                norm = _normalize_company_url(await link.get_attribute("href") or "")
+                if norm:
+                    urls.add(norm)
+            if len(urls) == prev_count and len(urls) > 0:
+                break
+            prev_count = len(urls)
     except Exception as exc:
         logger.warning("URL collection error: %s", exc)
     return urls
+
+
+def get_combination_db_stats(conn: sqlite3.Connection, country: str, size_label: str) -> tuple[int, int]:
+    """Return best-effort (companies, employees) count in DB for this combination."""
+    try:
+        size_prefix = size_label.split(" ")[0].replace(",", "")
+        cur = conn.execute(
+            """
+            SELECT c.linkedin_url 
+            FROM companies c
+            WHERE c.country = ? 
+              AND (
+                replace(replace(c.company_size, ',', ''), ' ', '') LIKE '%' || ? || '%'
+                OR ? LIKE '%' || replace(replace(c.company_size, ',', ''), ' ', '') || '%'
+              )
+            """,
+            (country, size_prefix, size_prefix)
+        )
+        matching_urls = [r[0] for r in cur.fetchall()]
+        if not matching_urls:
+            return 0, 0
+            
+        co_cnt = len(matching_urls)
+        
+        # Now count employees for these companies
+        placeholders = ",".join("?" for _ in matching_urls)
+        emp_cur = conn.execute(
+            f"SELECT COUNT(*) FROM employees WHERE company_linkedin_url IN ({placeholders})",
+            matching_urls
+        )
+        emp_cnt = emp_cur.fetchone()[0]
+        return co_cnt, emp_cnt
+    except Exception:
+        try:
+            cur = conn.execute("SELECT COUNT(*) FROM companies WHERE country = ?", (country,))
+            co_cnt = cur.fetchone()[0]
+            emp_cur = conn.execute(
+                "SELECT COUNT(*) FROM employees WHERE company_linkedin_url IN (SELECT linkedin_url FROM companies WHERE country = ?)",
+                (country,)
+            )
+            emp_cnt = emp_cur.fetchone()[0]
+            return co_cnt, emp_cnt
+        except Exception:
+            return 0, 0
 
 
 async def discover_companies(
@@ -969,9 +1335,13 @@ async def discover_companies(
             update_combination(conn, combo["id"], "exhausted", 0, combo["total_found"])
             continue
 
+        combo_pct = (combos_tried / MAX_COMBOS_PER_RUN) * 100
+        company_pct = (len(results) / MAX_COMPANIES_PER_RUN) * 100
+        logger.info("We are starting a new search combination of filters.")
         logger.info(
-            "Combination [%d] (%d/%d): %s | %s | %s  (resume page %d)",
-            combo["id"], combos_tried, MAX_COMBOS_PER_RUN,
+            "Combination [%d] (%d/%d - %.1f%%) | Companies found: %d/%d (%.1f%%): %s | %s | %s  (resume page %d)",
+            combo["id"], combos_tried, MAX_COMBOS_PER_RUN, combo_pct,
+            len(results), MAX_COMPANIES_PER_RUN, company_pct,
             combo["country_name"], combo["industry_name"],
             combo["size_label"], combo["last_page"],
         )
@@ -981,13 +1351,16 @@ async def discover_companies(
         combo_total = combo["total_found"]
         exhausted   = False
         last_pg     = combo["last_page"]
+        added_this_combo = 0
+        stopped_for_company_cap = False
 
         # Navigate to page 0 first
         base_url = build_base_search_url(combo, 0)
         logger.info("  Navigating to: %s", base_url)
         try:
+            await page.bring_to_front()   # keep browser foreground → prevent OS timer throttle
             await page.goto(base_url, wait_until="domcontentloaded", timeout=35_000)
-            await sleep_rand(*DELAY_MEDIUM)
+            await sleep_rand(*DELAY_MEDIUM, label="post-nav page 0")
         except Exception as exc:
             logger.warning("  Failed to load base URL: %s", exc)
             update_combination(conn, combo["id"], "pending",
@@ -1002,19 +1375,30 @@ async def discover_companies(
             logger.warning("  ⚠ companyHqGeo missing from URL. Landed: %s", landed_url)
 
         # Paginate
+        _bring_front_every = 3   # call bring_to_front() every N pages
         for pg in range(combo["last_page"], MAX_PAGES_PER_COMBO):
             if len(results) >= MAX_COMPANIES_PER_RUN:
+                stopped_for_company_cap = True
                 break
+
+            # Keep window in foreground every few pages so Windows can't
+            # silently background it between navigations.
+            if pg % _bring_front_every == 0:
+                try:
+                    await page.bring_to_front()
+                except Exception:
+                    pass
 
             if pg > 0:
                 try:
                     next_url = build_base_search_url(combo, pg)
+                    await page.bring_to_front()   # keep browser foreground → prevent OS timer throttle
                     await page.goto(next_url, wait_until="domcontentloaded",
                                     timeout=35_000)
-                    await sleep_rand(*DELAY_MEDIUM)
+                    await sleep_rand(*DELAY_MEDIUM, label=f"post-nav page {pg}")
                 except Exception as exc:
                     logger.warning("  Page %d nav error: %s", pg, exc)
-                    await sleep_rand(*DELAY_LONG)
+                    await sleep_rand(*DELAY_LONG, label="error-recovery")
                     break
 
             found = await _collect_urls_from_page(page)
@@ -1037,6 +1421,7 @@ async def discover_companies(
                     seen.add(u)
                     results.append((u, combo["country_name"]))
                     added += 1
+                    added_this_combo += 1
 
             combo_total += len(found)
             last_pg      = pg + 1
@@ -1046,29 +1431,59 @@ async def discover_companies(
             )
             update_combination(conn, combo["id"], "in_progress",
                                last_pg, combo_total)
-            await sleep_rand(*DELAY_MEDIUM)
 
-        # Mark final status
-        if exhausted or last_pg >= MAX_PAGES_PER_COMBO:
-            final_status = "exhausted"
-        else:
-            final_status = "in_progress"
+            # Stop when this page adds nothing: same company on every page, or all
+            # results already in DB — avoids burning ~25s × remaining pages.
+            if added == 0:
+                logger.info(
+                    "  Page %d: 0 new — stopping pagination for this combination.",
+                    pg,
+                )
+                exhausted = True
+                break
+
+            await sleep_rand(*DELAY_MEDIUM, label=f"inter-page pg{pg}")
+
+        # Mark combination complete so the next loop picks another row from the queue
+        final_status = finalize_combination_status(
+            exhausted=exhausted,
+            last_page=last_pg,
+            added_this_combo=added_this_combo,
+            stopped_for_company_cap=stopped_for_company_cap,
+        )
         update_combination(conn, combo["id"], final_status, last_pg, combo_total)
-        logger.info("  Combination [%d] → %s", combo["id"], final_status)
+        co_db, emp_db = get_combination_db_stats(conn, combo["country_name"], combo["size_label"])
+        logger.info("................................................................................")
+        logger.info(
+            "Combination %s | %s | %s : %d Companies %d employees",
+            combo["country_name"], combo["industry_name"], combo["size_label"], co_db, emp_db
+        )
+        logger.info("................................................................................")
 
-        # Delay between combinations
-        if combos_tried < MAX_COMBOS_PER_RUN and len(results) < MAX_COMPANIES_PER_RUN:
+        # Advance to next combination in search_combinations after a finished combo
+        will_continue = (
+            combos_tried < MAX_COMBOS_PER_RUN
+            and len(results) < MAX_COMPANIES_PER_RUN
+            and final_status == "exhausted"
+        )
+
+        # Delay between combinations (only when moving to the next combo)
+        if will_continue:
             if combos_tried % 5 == 0 and combos_tried > 0:
                 rest = random.uniform(180.0, 300.0)
                 logger.info("  Extended rest %.0f s after %d combinations…", rest, combos_tried)
-                await asyncio.sleep(rest)
+                await sleep_rand(rest, rest, label="extended-combo-rest")
             else:
                 delay = random.uniform(*DELAY_BETWEEN_COMBOS)
                 logger.info("  Waiting %.0f s before next combination (anti-block)…", delay)
-                await asyncio.sleep(delay)
+                await sleep_rand(delay, delay, label="between-combos")
 
     await page.close()
-    logger.info("Discovery done: %d new companies queued.", len(results))
+    logger.info(
+        "Discovery done: %d new companies queued after %d combination(s) tried.",
+        len(results),
+        combos_tried,
+    )
     return results[:MAX_COMPANIES_PER_RUN]
 
 
@@ -1089,6 +1504,7 @@ async def scrape_about_section(context, company_url: str) -> dict:
     try:
         await page.goto(about_url, wait_until="domcontentloaded", timeout=30_000)
         await sleep_rand(*DELAY_SHORT)
+        await maybe_mouse_drift(page)
         await human_scroll(page, steps=3)
     except Exception as exc:
         logger.debug("Could not load /about/: %s", exc)
@@ -1202,6 +1618,7 @@ async def scrape_company_data(context, company_url: str, country_name: str) -> d
         try:
             await page.goto(company_url, wait_until="domcontentloaded", timeout=40_000)
             await sleep_rand(*DELAY_MEDIUM)
+            await maybe_mouse_drift(page)
             await human_scroll(page, steps=4)
             break
         except Exception as exc:
@@ -1299,8 +1716,10 @@ async def _scrape_employee_dom(page, company_url: str, company_name: str) -> lis
         for card in (await page.query_selector_all(
             "li.org-people-profile-card__profile-card-spacing, "
             "div[data-member-id], li.reusable-search__result-container"
-        ))[:10]:
+        ))[:MAX_EMPLOYEES_PER_COMPANY]:
             try:
+                if len(employees) >= MAX_EMPLOYEES_PER_COMPANY:
+                    break
                 # Try named class first; avoid aria-hidden='true' which holds
                 # LinkedIn connection degree indicators (· 2nd, · 3rd), not names
                 name_el = await card.query_selector(
@@ -1353,6 +1772,7 @@ async def _scrape_employee_dom(page, company_url: str, company_name: str) -> lis
                     "scraped_timestamp":    ts,
                     "updated_timestamp":    ts,
                 })
+                await sleep_rand(*DELAY_BETWEEN_EMPLOYEE_CARDS)
             except Exception:
                 pass
     except Exception as exc:
@@ -1363,6 +1783,7 @@ async def _scrape_employee_dom(page, company_url: str, company_name: str) -> lis
 async def discover_employees(context, company: dict) -> list:
     company_name = company.get("company_name", "Unknown")
     company_url  = company.get("linkedin_url", "")
+    logger.info("We are now starting to scrape employees for this company.")
     logger.info("  Employees for '%s'…", company_name)
     _api_employee_buffer.clear()
 
@@ -1374,6 +1795,7 @@ async def discover_employees(context, company: dict) -> list:
             await page.goto(company_url.rstrip("/") + "/people/",
                             wait_until="domcontentloaded", timeout=40_000)
             await sleep_rand(*DELAY_MEDIUM)
+            await maybe_mouse_drift(page)
             await human_scroll(page, steps=6)
             break
         except Exception as exc:
@@ -1386,18 +1808,19 @@ async def discover_employees(context, company: dict) -> list:
     ts = now_ts()
     if _api_employee_buffer:
         employees = []
-        for rec in _api_employee_buffer[:10]:
+        for rec in _api_employee_buffer[:MAX_EMPLOYEES_PER_COMPANY]:
             rec["company_linkedin_url"] = company_url
             rec["company_name"]         = company_name
             rec.setdefault("updated_timestamp", ts)
             employees.append(rec)
+            await sleep_rand(0.2, 0.65)
         logger.info("  %d employees via API.", len(employees))
     else:
         employees = await _scrape_employee_dom(page, company_url, company_name)
         logger.info("  %d employees via DOM.", len(employees))
 
     await page.close()
-    return employees
+    return employees[:MAX_EMPLOYEES_PER_COMPANY]
 
 
 def save_company(conn: sqlite3.Connection, company: dict) -> None:
@@ -1411,7 +1834,10 @@ def save_company(conn: sqlite3.Connection, company: dict) -> None:
 def save_employees(conn: sqlite3.Connection, employees: list[dict]) -> None:
     for emp in employees:
         upsert_employee(conn, emp)
+        print()
+        logger.info("    👤 Employee: %s | Title: %s", emp.get("employee_name", "?"), emp.get("job_title", "?"))
     if employees:
+        print()
         logger.info("  ✓ %d employees saved.", len(employees))
 
 
@@ -1419,68 +1845,276 @@ def save_employees(conn: sqlite3.Connection, employees: list[dict]) -> None:
 # MAIN
 # ===========================================================================
 
+def _format_run_duration(seconds: float) -> str:
+    """Human-readable duration for run summary logs."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    m, s = divmod(int(seconds), 60)
+    if m < 60:
+        return f"{m}m {s}s"
+    h, m = divmod(m, 60)
+    return f"{h}h {m}m {s}s"
+
+
+def print_db_summary_to_logger() -> None:
+    try:
+        import sqlite3
+        import os
+        if not os.path.exists(DB_FILE):
+            return
+        conn = sqlite3.connect(DB_FILE)
+        row = conn.execute("SELECT * FROM v_validation_pipeline_summary").fetchone()
+        if not row:
+            conn.close()
+            return
+        names = [d[0] for d in conn.execute("SELECT * FROM v_validation_pipeline_summary").description]
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("  DATABASE PIPELINE SUMMARY (v_validation_pipeline_summary)")
+        logger.info("=" * 60)
+        for name, val in zip(names, row):
+            logger.info(f"  {name:<30}: {val:,}" if isinstance(val, int) else f"  {name:<30}: {val}")
+        logger.info("=" * 60)
+        conn.close()
+    except Exception as e:
+        logger.warning("Could not print database validation summary: %s", e)
+
+
+def _count_emails_in_db(conn: sqlite3.Connection) -> int:
+    """
+    Return the total number of rows in email_attempts.
+    Returns 0 if the table does not yet exist (first run before any campaign).
+    """
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM email_attempts"
+        ).fetchone()
+        return row[0] if row else 0
+    except sqlite3.OperationalError:
+        # Table hasn't been created yet by send_linkedin_campaigns.py
+        return 0
+
+
+def parse_cli_args() -> argparse.Namespace:
+    """--test is accepted in any casing (--Test, --TEST, etc.)."""
+    argv = [("--test" if a.lower() == "--test" else a) for a in sys.argv[1:]]
+    parser = argparse.ArgumentParser(
+        description="LinkedIn company/employee scraper (Playwright + SQLite).",
+    )
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Quick run: 1 search combo, 1 results page, 1 new company, 1 employee.",
+    )
+    return parser.parse_args(argv)
+
+
+def apply_test_mode_limits() -> None:
+    """Shrink run caps for a fast end-to-end smoke test."""
+    global MAX_COMBOS_PER_RUN, MAX_COMPANIES_PER_RUN, MAX_PAGES_PER_COMBO
+    global MAX_EMPLOYEES_PER_COMPANY, TEST_MODE
+    TEST_MODE = True
+    MAX_COMBOS_PER_RUN = 1
+    MAX_COMPANIES_PER_RUN = 1
+    MAX_PAGES_PER_COMBO = 1
+    MAX_EMPLOYEES_PER_COMPANY = 1
+    logger.info(
+        "TEST MODE: max %d combo, %d company, %d employee, %d search page per combo.",
+        MAX_COMBOS_PER_RUN,
+        MAX_COMPANIES_PER_RUN,
+        MAX_EMPLOYEES_PER_COMPANY,
+        MAX_PAGES_PER_COMBO,
+    )
+
+
+async def mouse_mover_loop() -> None:
+    """
+    Simulates a small relative mouse movement (1 pixel back and forth) every 30 seconds
+    to prevent Windows from entering standby/sleep due to user inactivity.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        class POINT(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+        logger.info("Setting Windows thread execution state to prevent sleep + mouse movement simulation...")
+        while True:
+            await asyncio.sleep(30)
+            try:
+                pt = POINT()
+                if ctypes.windll.user32.GetCursorPos(ctypes.byref(pt)):
+                    # Move cursor 1 pixel to the right, then back
+                    ctypes.windll.user32.SetCursorPos(pt.x + 1, pt.y)
+                    ctypes.windll.user32.SetCursorPos(pt.x, pt.y)
+            except Exception:
+                pass
+    except asyncio.CancelledError:
+        logger.info("Stopped background mouse movement task.")
+    except Exception as e:
+        logger.warning("Background mouse mover encountered error: %s", e)
+
+
 async def main() -> None:
-    logger.info("=== LinkedIn Scraper v4.1 ===")
+    logger.info("=== LinkedIn Scraper v4.2 ===")
+    if TEST_MODE:
+        logger.info("  (running with --test limits)")
 
-    conn = init_db(DB_FILE)
-    seed_criteria(conn)        # populate / update the 3 reference tables
+    wall_start = datetime.now()
+    perf_start = time.perf_counter()
+    ts_fmt = "%Y-%m-%d %H:%M:%S"
+    
+    companies_saved = 0
+    employees_saved = 0
+    countries_covered = set()
+    company_processing_times = []
+    emails_start = 0   # snapshot before run; delta = emails added this session
 
-    # ── Reset pending combinations so sort_order changes take effect ──────
-    # Pending rows are cheap to rebuild; in_progress and exhausted are kept
-    # so no real progress is ever lost.
-    pending = conn.execute(
-        "SELECT COUNT(*) FROM search_combinations WHERE status='pending'"
-    ).fetchone()[0]
-    conn.execute("DELETE FROM search_combinations WHERE status='pending'")
-    conn.commit()
-    if pending:
-        logger.info(
-            "Cleared %d pending combinations — rebuilding with current sort order.",
-            pending,
-        )
+    # Start background mouse mover task to reset idle timer
+    mouse_task = asyncio.create_task(mouse_mover_loop())
 
-    build_combinations(conn)   # re-insert pending rows in correct sort order
+    try:
+        conn = init_db(DB_FILE)
+        seed_criteria(conn)        # populate / update the 3 reference tables
+        emails_start = _count_emails_in_db(conn)
 
-    # Summary of queue state
-    rows = conn.execute(
-        "SELECT status, COUNT(*) FROM search_combinations GROUP BY status"
-    ).fetchall()
-    logger.info("Queue: %s", " | ".join(f"{r[0]}: {r[1]}" for r in rows))
+        # ── Reset pending combinations so sort_order changes take effect ──────
+        # Pending rows are cheap to rebuild; in_progress and exhausted are kept
+        # so no real progress is ever lost.
+        pending = conn.execute(
+            "SELECT COUNT(*) FROM search_combinations WHERE status='pending'"
+        ).fetchone()[0]
+        conn.execute("DELETE FROM search_combinations WHERE status='pending'")
+        conn.commit()
+        if pending:
+            logger.info(
+                "Cleared %d pending combinations — rebuilding with current sort order.",
+                pending,
+            )
 
-    async with async_playwright() as pw:
-        context = await load_or_create_session(pw)
+        build_combinations(conn)   # re-insert pending rows in correct sort order
+        recover_stale_combinations(conn)
+        if not verify_search_combinations_table(conn):
+            return
+
+        async with async_playwright() as pw:
+            context = await load_or_create_session(pw)
+            try:
+                # Returns list of (url, country_name)
+                discoveries = await discover_companies(context, conn)
+
+                if not discoveries:
+                    verify_search_combinations_table(conn)
+                    logger.warning(
+                        "No new companies found this run.\n"
+                        "The script tried up to %d combination(s) from "
+                        "search_combinations; all URLs may already be in the DB, "
+                        "or every combo is exhausted. Activate more criteria in "
+                        "criteria_* tables and run build_combinations(), or reset "
+                        "exhausted rows to pending to re-scan.",
+                        MAX_COMBOS_PER_RUN,
+                    )
+                    return
+
+                for idx, (url, country_name) in enumerate(discoveries, 1):
+                    print()
+                    pct = (idx / len(discoveries)) * 100
+                    if idx > 1:
+                        logger.info("We are now moving from the previous company to the next one.")
+                    logger.info("─── %d / %d (%.1f%%) ───", idx, len(discoveries), pct)
+                    company_start_time = time.perf_counter()
+                    try:
+                        company   = await scrape_company_data(context, url, country_name)
+                        save_company(conn, company)
+                        print()
+                        employees = []
+                        if company.get("website_raw"):
+                            employees = await discover_employees(context, company)
+                            save_employees(conn, employees)
+                        else:
+                            logger.info("  Skipping employee scraping - no website found.")
+                        beep_ok()   # 🔔 short beep — company + employees saved
+
+                        companies_saved += 1
+                        employees_saved += len(employees)
+                        if country_name:
+                            countries_covered.add(country_name)
+
+                        company_duration = time.perf_counter() - company_start_time
+                        company_processing_times.append(company_duration)
+
+                        if TEST_MODE:
+                            logger.info("TEST MODE: stopping after 1 company.")
+                            break
+
+                        await sleep_rand(*DELAY_BETWEEN_COMPANIES, label="between-companies")
+                        if random.random() < 0.22:
+                            await sleep_rand(2.0, 10.0, label="company-jitter")
+                    except Exception as exc:
+                        logger.error("Error on %s: %s", url, exc, exc_info=True)
+                        beep_error()   # 🚨 low beep — company failed
+                        await sleep_rand(*DELAY_LONG, label="company-error-recovery")
+                        if TEST_MODE:
+                            break
+
+            finally:
+                await context.storage_state(path=SESSION_FILE)
+                await context.close()
+
+        export_all_csv(conn)
+        conn.close()
+        logger.info("=== Done ===")
+
+    finally:
+        mouse_task.cancel()
         try:
-            # Returns list of (url, country_name)
-            discoveries = await discover_companies(context, conn)
+            await mouse_task
+        except asyncio.CancelledError:
+            pass
+        wall_end = datetime.now()
+        elapsed_s = time.perf_counter() - perf_start
+        avg_time_per_company = (sum(company_processing_times) / len(company_processing_times)) if company_processing_times else 0.0
+        
+        logger.info("=== RUN SUMMARY ===")
+        logger.info("  Start time      : %s", wall_start.strftime(ts_fmt))
+        logger.info("  End time        : %s", wall_end.strftime(ts_fmt))
+        logger.info(
+            "  Total duration  : %s (%.1f seconds)",
+            _format_run_duration(elapsed_s),
+            elapsed_s,
+        )
+        logger.info("  Companies saved : %d", companies_saved)
+        logger.info("  Employees saved : %d", employees_saved)
+        logger.info(
+            "  Time / company  : %s (%.1f seconds)",
+            _format_run_duration(avg_time_per_company),
+            avg_time_per_company,
+        )
+        logger.info(
+            "  Countries cvrd  : %d (%s)",
+            len(countries_covered),
+            ", ".join(sorted(countries_covered)) if countries_covered else "None"
+        )
+        # email_attempts is written by send_linkedin_campaigns.py, not this
+        # scraper — so we report the total in DB plus any delta from this session.
+        try:
+            emails_total = _count_emails_in_db(conn)
+            emails_added = emails_total - emails_start
+            logger.info(
+                "  Emails added    : %d  (total in DB: %d)",
+                emails_added, emails_total,
+            )
+        except Exception:
+            pass  # conn already closed — skip gracefully
 
-            if not discoveries:
-                logger.warning(
-                    "No new companies found.\n"
-                    "All combinations may be exhausted, or try activating "
-                    "more criteria in the DB reference tables."
-                )
-                return
-
-            for idx, (url, country_name) in enumerate(discoveries, 1):
-                logger.info("─── %d / %d ───", idx, len(discoveries))
-                try:
-                    company   = await scrape_company_data(context, url, country_name)
-                    employees = await discover_employees(context, company)
-                    save_company(conn, company)
-                    save_employees(conn, employees)
-                    await sleep_rand(*DELAY_LONG)
-                except Exception as exc:
-                    logger.error("Error on %s: %s", url, exc, exc_info=True)
-                    await sleep_rand(*DELAY_LONG)
-
-        finally:
-            await context.storage_state(path=SESSION_FILE)
-            await context.close()
-
-    export_all_csv(conn)
-    conn.close()
-    logger.info("=== Done ===")
+        print_db_summary_to_logger()
+        beep_done()   # 🔔🔔🔔 rising triple beep — run fully complete
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    _cli = parse_cli_args()
+    if _cli.test:
+        apply_test_mode_limits()
+    with prevent_windows_sleep():
+        asyncio.run(main())

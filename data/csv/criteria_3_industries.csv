@@ -1,0 +1,169 @@
+industry_name,industry_id,active,notes
+Accounting,160,1,
+Airlines and Aviation,58,1,
+Alternative Dispute Resolution,135,1,
+Alternative Medicine,70,1,
+Animation,29,1,
+Apparel and Fashion,23,1,
+Architecture and Planning,41,1,
+Arts and Crafts,90,1,
+Artificial Intelligence,1990,1,
+Automotive,53,1,
+Aviation and Aerospace,147,1,
+Banking,43,1,
+Biotechnology,11,1,
+Blockchain Services,3130,1,
+Broadcast Media Production and Distribution,64,1,
+Building Materials,91,1,
+Business Consulting and Services,2190,1,
+Capital Markets,131,1,
+Chemical Manufacturing,54,1,
+Civic and Social Organizations,95,1,
+Civil Engineering,112,1,
+Cloud Computing,104,1,
+Commercial Real Estate,44,1,
+Computer and Network Security,118,1,
+Computer Hardware Manufacturing,14,1,
+Computer Networking Products,139,1,
+Construction,48,1,
+Consumer Electronics,5,1,
+Consumer Goods,29,1,
+Consumer Services,94,1,
+Cosmetics,31,1,
+Cybersecurity,2996,1,
+Dairy Product Manufacturing,TODO,0,LinkedIn ID not yet verified - find via URL
+Data Infrastructure and Analytics,3130,1,
+Defense and Space Manufacturing,19,1,
+Design Services,45,1,
+DevOps,TODO,0,LinkedIn ID not yet verified - find via URL
+Digital Marketing,2272,1,
+Digital Transformation,TODO,0,LinkedIn ID not yet verified - find via URL
+E-learning Providers,2379,1,
+EdTech,TODO,0,LinkedIn ID not yet verified - find via URL
+Education Administration Programs,68,1,
+Embedded Software Products,TODO,0,LinkedIn ID not yet verified - find via URL
+Enterprise Software,TODO,0,LinkedIn ID not yet verified - find via URL
+Entertainment Providers,136,1,
+Environmental Services,115,1,
+Events Services,143,1,
+Executive Offices,121,1,
+Facilities Services,150,1,
+Farming,1,1,
+Financial Services,43,1,
+Fine Art,93,1,
+FinTech,TODO,0,LinkedIn ID not yet verified - find via URL
+Food and Beverage Manufacturing,3,1,
+Food and Beverage Services,2939,1,
+Food Production,3,1,
+Fundraising,TODO,0,LinkedIn ID not yet verified - find via URL
+Furniture and Home Furnishings Manufacturing,TODO,0,LinkedIn ID not yet verified - find via URL
+Gambling Facilities and Casinos,TODO,0,LinkedIn ID not yet verified - find via URL
+Gaming,TODO,0,LinkedIn ID not yet verified - find via URL
+Glass Ceramics and Concrete Manufacturing,TODO,0,LinkedIn ID not yet verified - find via URL
+Government Administration,75,1,
+Government Relations Services,130,1,
+GovTech,TODO,0,LinkedIn ID not yet verified - find via URL
+Graphic Design,TODO,0,LinkedIn ID not yet verified - find via URL
+Health and Human Services,139,1,
+HealthTech,TODO,0,LinkedIn ID not yet verified - find via URL
+Higher Education,69,1,
+Hospitality,32,1,
+Hospitals and Health Care,14,1,
+Human Resources Services,137,1,
+Import and Export,65,1,
+Individual and Family Services,107,1,
+Industrial Machinery Manufacturing,TODO,0,LinkedIn ID not yet verified - find via URL
+Information Services,84,1,
+Infrastructure as a Service (IaaS),TODO,0,LinkedIn ID not yet verified - find via URL
+Insurance,42,1,
+InsurTech,TODO,0,LinkedIn ID not yet verified - find via URL
+International Affairs,76,1,
+International Trade and Development,66,1,
+Internet Marketplace Platforms,TODO,0,LinkedIn ID not yet verified - find via URL
+Investment Banking,127,1,
+Investment Management,128,1,
+IT Services and IT Consulting,96,1,
+IT System Custom Software Development,TODO,0,LinkedIn ID not yet verified - find via URL
+Law Enforcement,126,1,
+Law Practice,109,1,
+Leasing Non-residential Real Estate,TODO,0,LinkedIn ID not yet verified - find via URL
+Legal Services,110,1,
+LegalTech,TODO,0,LinkedIn ID not yet verified - find via URL
+Legislative Offices,TODO,0,LinkedIn ID not yet verified - find via URL
+Leisure Travel and Tourism,34,1,
+Libraries,TODO,0,LinkedIn ID not yet verified - find via URL
+Logistics and Supply Chain,116,1,
+Luxury Goods and Jewelry,57,1,
+Machine Learning,TODO,0,LinkedIn ID not yet verified - find via URL
+Machinery Manufacturing,30,1,
+Management Consulting,111,1,
+Manufacturing,22,1,
+Market Research,87,1,
+Marketing Services,TODO,0,LinkedIn ID not yet verified - find via URL
+Marketing Technology,TODO,0,LinkedIn ID not yet verified - find via URL
+Media Production,33,1,
+Medical Equipment Manufacturing,86,1,
+Medical Practices,TODO,0,LinkedIn ID not yet verified - find via URL
+Mental Health Care,TODO,0,LinkedIn ID not yet verified - find via URL
+Mining,36,1,
+Mobile App Development,TODO,0,LinkedIn ID not yet verified - find via URL
+Motion Pictures and Film,38,1,
+Museums,TODO,0,LinkedIn ID not yet verified - find via URL
+Musicians,TODO,0,LinkedIn ID not yet verified - find via URL
+Nanotechnology Research,TODO,0,LinkedIn ID not yet verified - find via URL
+Newspaper Publishing,105,1,
+Non-profit Organizations,TODO,0,LinkedIn ID not yet verified - find via URL
+Oil and Gas,37,1,
+Online Audio and Video Media,TODO,0,LinkedIn ID not yet verified - find via URL
+Open Source Software,TODO,0,LinkedIn ID not yet verified - find via URL
+Packaging and Containers Manufacturing,TODO,0,LinkedIn ID not yet verified - find via URL
+Paper and Forest Product Manufacturing,TODO,0,LinkedIn ID not yet verified - find via URL
+Performing Arts,61,1,
+Pharmaceutical Manufacturing,85,1,
+Philanthropic Fundraising Services,TODO,0,LinkedIn ID not yet verified - find via URL
+Photography,TODO,0,LinkedIn ID not yet verified - find via URL
+Plastics Manufacturing,TODO,0,LinkedIn ID not yet verified - find via URL
+Platform as a Service (PaaS),TODO,0,LinkedIn ID not yet verified - find via URL
+Political Organizations,TODO,0,LinkedIn ID not yet verified - find via URL
+Primary and Secondary Education,TODO,0,LinkedIn ID not yet verified - find via URL
+Printing Services,TODO,0,LinkedIn ID not yet verified - find via URL
+Professional Training and Coaching,100,1,
+Public Policy Offices,TODO,0,LinkedIn ID not yet verified - find via URL
+Public Relations and Communications Services,1028,1,
+Public Safety,TODO,0,LinkedIn ID not yet verified - find via URL
+Rail Transportation,TODO,0,LinkedIn ID not yet verified - find via URL
+Real Estate,44,1,
+Recreational Facilities,TODO,0,LinkedIn ID not yet verified - find via URL
+Religious Institutions,TODO,0,LinkedIn ID not yet verified - find via URL
+Renewable Energy Semiconductor Manufacturing,TODO,0,LinkedIn ID not yet verified - find via URL
+Research Services,TODO,0,LinkedIn ID not yet verified - find via URL
+Restaurants,35,1,
+Retail,27,1,
+Retail Apparel and Fashion,TODO,0,LinkedIn ID not yet verified - find via URL
+RetailTech,TODO,0,LinkedIn ID not yet verified - find via URL
+SaaS,4,1,
+Security and Investigations,52,1,
+Semiconductor Manufacturing,7,1,
+Shipbuilding,TODO,0,LinkedIn ID not yet verified - find via URL
+Software Development,4,1,
+Spectator Sports,TODO,0,LinkedIn ID not yet verified - find via URL
+Sporting Goods Manufacturing,TODO,0,LinkedIn ID not yet verified - find via URL
+Staffing and Recruiting,104,1,
+Telecommunications,8,1,
+Technology Information and Internet,6,1,
+Technology Information and Media,1594,1,
+Textile Manufacturing,TODO,0,LinkedIn ID not yet verified - find via URL
+Think Tanks,TODO,0,LinkedIn ID not yet verified - find via URL
+Tobacco Manufacturing,TODO,0,LinkedIn ID not yet verified - find via URL
+Translation and Localization,TODO,0,LinkedIn ID not yet verified - find via URL
+Transportation Logistics Supply Chain and Storage,116,1,
+Truck Transportation,TODO,0,LinkedIn ID not yet verified - find via URL
+Utilities,49,1,
+Venture Capital and Private Equity Principals,128,1,
+Veterinary Services,TODO,0,LinkedIn ID not yet verified - find via URL
+Warehousing and Storage,TODO,0,LinkedIn ID not yet verified - find via URL
+Web Development,TODO,0,LinkedIn ID not yet verified - find via URL
+Wholesale,50,1,
+Wine and Spirits,TODO,0,LinkedIn ID not yet verified - find via URL
+Wireless Services,TODO,0,LinkedIn ID not yet verified - find via URL
+Writing and Editing,TODO,0,LinkedIn ID not yet verified - find via URL

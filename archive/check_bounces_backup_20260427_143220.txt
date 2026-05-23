@@ -1,0 +1,388 @@
+#!/usr/bin/env python3
+"""
+check_bounces.py
+================
+Connects to each Gmail account via IMAP, finds bounce/NDR emails,
+and marks the corresponding email_attempts records as 'bounced'
+in linkedin_data.db.
+
+Run this once a day, the morning after a send run.
+
+Config files needed (same folder):
+  email_config.json   — Gmail App Passwords
+  linkedin_data.db    — the scraper database
+
+After running, the next send_linkedin_campaigns.py run will
+automatically skip bounced formats and try the next one.
+"""
+
+import imaplib
+import email
+import json
+import os
+import re
+import sqlite3
+import ssl
+import sys
+import time
+import logging
+from datetime import datetime, timedelta
+
+# =============================================
+# CONFIG
+# =============================================
+_SCRIPT_DIR      = os.path.dirname(os.path.abspath(__file__))
+SMTP_CONFIG_FILE = os.path.join(_SCRIPT_DIR, "email_config.json")
+DB_PATH          = os.path.join(_SCRIPT_DIR, "linkedin_data.db")
+
+# Each run gets its own timestamped log file inside a logs/ subfolder
+_LOG_DIR  = os.path.join(_SCRIPT_DIR, "logs")
+os.makedirs(_LOG_DIR, exist_ok=True)
+LOG_FILE  = os.path.join(
+    _LOG_DIR,
+    f"check_bounces_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
+)
+
+# IMAP settings for Gmail
+IMAP_HOST = "imap.gmail.com"
+IMAP_PORT = 993
+
+# Bounce sender patterns — emails from these indicate a bounce
+BOUNCE_SENDERS = [
+    "mailer-daemon@googlemail.com",
+    "mailer-daemon@google.com",
+    "postmaster@",
+    "mailer-daemon@",
+    "noreply@",
+]
+
+# Subject patterns that indicate a bounce/NDR
+BOUNCE_SUBJECTS = [
+    "delivery status notification",
+    "undeliverable",
+    "mail delivery failed",
+    "returned mail",
+    "failure notice",
+    "delivery failure",
+    "non-delivery",
+    "message not delivered",
+    "unable to deliver",
+    "bounce",
+]
+
+# =============================================
+# LOGGING
+# =============================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)-7s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(LOG_FILE, mode="w", encoding="utf-8"),
+    ]
+)
+logger = logging.getLogger("bounce_checker")
+logger.info(f"📄 Log file: {LOG_FILE}")
+
+# =============================================
+# DB HELPERS
+# =============================================
+
+def open_db() -> sqlite3.Connection:
+    if not os.path.exists(DB_PATH):
+        logger.error(f"Database not found: {DB_PATH}")
+        sys.exit(1)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS send_runs (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            script          TEXT,
+            started_at      TEXT,
+            finished_at     TEXT,
+            emails_sent     INTEGER DEFAULT 0,
+            emails_failed   INTEGER DEFAULT 0,
+            bounces_found   INTEGER DEFAULT 0,
+            country_filter  TEXT,
+            notes           TEXT
+        )
+    """)
+    conn.commit()
+    return conn
+
+
+def mark_bounced(conn: sqlite3.Connection, email_address: str) -> bool:
+    """Mark an email address as bounced. Returns True if a record was updated."""
+    cur = conn.execute(
+        "SELECT id, status FROM email_attempts WHERE email_address = ?",
+        (email_address.lower(),)
+    )
+    row = cur.fetchone()
+    if not row:
+        return False
+    if row["status"] == "bounced":
+        return False  # already marked
+
+    conn.execute("""
+        UPDATE email_attempts
+        SET    status = 'bounced',
+               bounce_detected_at = ?
+        WHERE  email_address = ?
+    """, (datetime.now().isoformat(), email_address.lower()))
+    conn.commit()
+    return True
+
+
+def get_all_sent_addresses(conn: sqlite3.Connection) -> set:
+    """Return all email addresses we sent to."""
+    cur = conn.execute("SELECT email_address FROM email_attempts WHERE status = 'sent'")
+    return {row["email_address"].lower() for row in cur.fetchall()}
+
+# =============================================
+# IMAP / BOUNCE DETECTION
+# =============================================
+
+def is_bounce(msg) -> bool:
+    """Check if an email message is a bounce/NDR."""
+    sender  = (msg.get("From", "") or "").lower()
+    subject = (msg.get("Subject", "") or "").lower()
+
+    for pattern in BOUNCE_SENDERS:
+        if pattern in sender:
+            return True
+    for pattern in BOUNCE_SUBJECTS:
+        if pattern in subject:
+            return True
+    return False
+
+
+def extract_bounced_addresses(msg, known_addresses: set) -> list:
+    """
+    Extract the original recipient address from a bounce email.
+    Looks in headers and body for addresses we actually sent to.
+    """
+    found = []
+
+    # Check headers first
+    for header in ["X-Failed-Recipients", "Final-Recipient", "Original-Recipient"]:
+        val = msg.get(header, "") or ""
+        for addr in re.findall(r'[\w._%+\-]+@[\w.\-]+\.[a-zA-Z]{2,}', val):
+            if addr.lower() in known_addresses:
+                found.append(addr.lower())
+
+    # Walk the body parts
+    if not found:
+        for part in msg.walk():
+            ct = part.get_content_type()
+            if ct in ("text/plain", "message/delivery-status"):
+                try:
+                    body = part.get_payload(decode=True)
+                    if body:
+                        body_str = body.decode("utf-8", errors="replace")
+                        for addr in re.findall(
+                            r'[\w._%+\-]+@[\w.\-]+\.[a-zA-Z]{2,}', body_str
+                        ):
+                            if addr.lower() in known_addresses:
+                                found.append(addr.lower())
+                except Exception:
+                    pass
+
+    return list(set(found))
+
+
+def _make_ssl_context() -> ssl.SSLContext:
+    """Return an explicit TLS 1.2+ context — avoids SSL EOF on older defaults."""
+    ctx = ssl.create_default_context()
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    return ctx
+
+
+def _imap_connect(gmail_address: str, app_password: str) -> imaplib.IMAP4_SSL:
+    """Open a fresh IMAP4_SSL connection with an explicit TLS context."""
+    mail = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, ssl_context=_make_ssl_context())
+    mail.login(gmail_address, app_password)
+    mail.select("INBOX")
+    return mail
+
+
+def check_inbox(gmail_address: str, app_password: str,
+                known_addresses: set) -> list:
+    """
+    Connect to Gmail IMAP, find bounce emails, return list of bounced addresses.
+    Reconnects automatically if the SSL connection drops mid-fetch.
+    """
+    bounced = []
+    try:
+        logger.info(f"  Connecting to {gmail_address}...")
+        mail = _imap_connect(gmail_address, app_password)
+
+        # Limit search to last 30 days — avoids re-scanning old history
+        since_date = (datetime.now() - timedelta(days=30)).strftime("%d-%b-%Y")
+
+        # Search for potential bounce emails
+        search_terms = [
+            f'(SINCE {since_date} FROM "mailer-daemon")',
+            f'(SINCE {since_date} FROM "postmaster")',
+            f'(SINCE {since_date} SUBJECT "delivery status")',
+            f'(SINCE {since_date} SUBJECT "undeliverable")',
+            f'(SINCE {since_date} SUBJECT "mail delivery failed")',
+            f'(SINCE {since_date} SUBJECT "failure notice")',
+        ]
+
+        message_ids = set()
+        for term in search_terms:
+            try:
+                _, ids = mail.search(None, term)
+                if ids and ids[0]:
+                    message_ids.update(ids[0].split())
+            except Exception:
+                pass
+
+        logger.info(f"  Found {len(message_ids)} potential bounce email(s)")
+
+        ids_list   = list(message_ids)
+        reconnects = 0
+
+        # ── PASS 1: Headers only (tiny payload — fast pre-filter) ────
+        HDRFETCH = "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT X-FAILED-RECIPIENTS)])"
+        relevant_ids = []
+        logger.info(f"  Pass 1: scanning headers of {len(ids_list)} email(s)...")
+
+        i = 0
+        while i < len(ids_list):
+            msg_id = ids_list[i]
+            try:
+                # Keep-alive ping every 100 messages to prevent idle timeout
+                if i > 0 and i % 100 == 0:
+                    try:
+                        mail.noop()
+                    except Exception:
+                        pass
+                    logger.info(f"    ...{i}/{len(ids_list)} headers done")
+
+                _, hdr_data = mail.fetch(msg_id, HDRFETCH)
+                # Guard: IMAP sometimes returns non-tuple responses for
+                # deleted/flagged messages
+                if not hdr_data or not isinstance(hdr_data[0], tuple):
+                    i += 1
+                    continue
+                raw_hdr = hdr_data[0][1]
+                if not isinstance(raw_hdr, bytes):
+                    i += 1
+                    continue
+
+                h        = email.message_from_bytes(raw_hdr)
+                sender   = (h.get("From", "") or "").lower()
+                subject  = (h.get("Subject", "") or "").lower()
+                failed_r = (h.get("X-Failed-Recipients", "") or "").lower()
+
+                is_bounce_hdr = (
+                    any(p in sender  for p in BOUNCE_SENDERS)
+                    or any(p in subject for p in BOUNCE_SUBJECTS)
+                    or bool(failed_r)
+                )
+                if is_bounce_hdr:
+                    relevant_ids.append(msg_id)
+
+                i += 1
+
+            except (ssl.SSLError, OSError, imaplib.IMAP4.abort) as e:
+                if reconnects >= 3:
+                    logger.warning(f"  Too many reconnects (pass 1); skipping {msg_id}: {e}")
+                    i += 1
+                    continue
+                reconnects += 1
+                logger.warning(f"  Connection dropped (attempt {reconnects}/3), reconnecting...")
+                time.sleep(2 * reconnects)
+                try:
+                    mail = _imap_connect(gmail_address, app_password)
+                except Exception as re_err:
+                    logger.error(f"  Reconnect failed: {re_err}")
+                    break
+            except Exception as e:
+                logger.warning(f"  Could not read header {msg_id}: {e}")
+                i += 1
+
+        logger.info(f"  Pass 1 done — {len(relevant_ids)}/{len(ids_list)} need full fetch.")
+
+        # ── PASS 2: Full RFC822 only for relevant emails ─────────────
+        reconnects = 0
+        i = 0
+        while i < len(relevant_ids):
+            msg_id = relevant_ids[i]
+            try:
+                _, data = mail.fetch(msg_id, "(RFC822)")
+                if not data or not isinstance(data[0], tuple):
+                    i += 1
+                    continue
+                raw = data[0][1]
+                if not isinstance(raw, bytes):
+                    i += 1
+                    continue
+                msg = email.message_from_bytes(raw)
+
+                if is_bounce(msg):
+                    addresses = extract_bounced_addresses(msg, known_addresses)
+                    for addr in addresses:
+                        logger.info(f"  📧 Bounce detected: {addr}")
+                        bounced.append(addr)
+
+                i += 1  # advance only on success
+
+            except (ssl.SSLError, OSError, imaplib.IMAP4.abort) as e:
+                # Connection dropped — reconnect and retry this message
+                if reconnects >= 3:
+                    logger.warning(f"  Too many reconnects (pass 2); skipping message {msg_id}: {e}")
+                    i += 1
+                    continue
+                reconnects += 1
+                logger.warning(f"  Connection dropped (attempt {reconnects}/3), reconnecting...")
+                time.sleep(2 * reconnects)
+                try:
+                    mail = _imap_connect(gmail_address, app_password)
+                except Exception as re_err:
+                    logger.error(f"  Reconnect failed: {re_err}")
+                    break
+                # retry same message_id (don't advance i)
+
+            except Exception as e:
+                logger.warning(f"  Could not read message {msg_id}: {e}")
+                i += 1
+
+        try:
+            mail.logout()
+        except Exception:
+            pass
+
+    except imaplib.IMAP4.error as e:
+        logger.error(f"  IMAP error for {gmail_address}: {e}")
+    except Exception as e:
+        logger.error(f"  Error checking {gmail_address}: {e}")
+
+    return bounced
+
+# =============================================
+# MAIN
+# =============================================
+
+def main():
+    os.system("cls" if os.name == "nt" else "clear")
+    logger.info("=" * 60)
+    logger.info("  BOUNCE CHECKER")
+    logger.info(f"  Run: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info("=" * 60)
+
+    # Load SMTP config (has App Passwords for IMAP too)
+    if not os.path.exists(SMTP_CONFIG_FILE):
+        logger.error(f"Config not found: {SMTP_CONFIG_FILE}")
+        return
+
+    with open(SMTP_CONFIG_FILE) as f:
+        config = json.load(f)
+    smtp_passwords = config.get("profiles", {})
+    logger.info(f"  {len(smtp_passwords)} Gmail account(s) to check")
+
+    # Open DB
+    conn = open_db()
+    known_addresses = get_all_s

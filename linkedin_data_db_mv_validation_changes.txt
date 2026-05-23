@@ -1,0 +1,55 @@
+LinkedIn Data DB - Million Verifier Validation Update
+Date: 2026-05-11
+
+Database updated:
+C:\Users\sandeep\Downloads\Claudes\CVL\data\db\linkedin_data.db
+
+Backup created before update:
+C:\Users\sandeep\Downloads\Claudes\CVL\data\db\linkedin_data.db.backup_before_mv_20260511_225115
+
+Summary:
+- No new tables were created.
+- No tables were removed.
+- Existing table updated: zerobounce_validation.
+- Row count stayed the same: 500 before, 500 after.
+- Original columns were not modified:
+  - email_address
+  - zb_status
+  - zb_sub_status
+  - zb_account
+  - zb_free_email
+  - source_batch
+  - imported_at
+
+Columns added to zerobounce_validation:
+- mv_status
+- mv_quality
+- mv_resultcode
+- mv_subresult
+- mv_free
+- mv_role
+- mv_didyoumean
+- mv_error
+- mv_validated_at
+- mv_raw_json
+
+Why mv prefix:
+mv = Million Verifier.
+These columns store validation results returned by the Apify actor "Email Verifier by Million Verifier".
+The existing zb_* columns remain the ZeroBounce validation results.
+
+Rows updated:
+200 rows in zerobounce_validation were populated with Million Verifier results from:
+C:\Users\sandeep\Downloads\Claudes\zeroclone\validated_emails.csv
+
+Million Verifier result counts written to DB:
+- ok: 107
+- catch_all: 60
+- invalid: 20
+- unknown: 13
+
+Verification notes:
+- Current zerobounce_validation row count: 500
+- Backup zerobounce_validation row count: 500
+- Rows with mv_validated_at populated: 200
+- Original non-mv column differences compared with backup: 0

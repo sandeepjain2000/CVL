@@ -1,0 +1,814 @@
+#!/usr/bin/env python3
+"""
+check_bounces.py
+================
+Two responsibilities in one run:
+
+  1. BOUNCE DETECTION
+     Connects to each Gmail account via IMAP, finds bounce/NDR emails,
+     and marks the corresponding email_attempts records as 'bounced'
+     in linkedin_data.db.  The next send_linkedin_campaigns.py run will
+     automatically skip bounced formats and try the next one.
+
+  2. CAREER-REPLY FORWARDING
+     After bounce processing, scans UNSEEN emails for genuine replies
+     that look career-related, and forwards them to the target inbox
+     (sandeepjain200019@gmail.com).  Forwarded emails are left UNREAD
+     in the source inbox so the account remains clean.
+
+Run this once a day, ideally the morning after a send run.
+
+Config files needed (same folder as this script):
+  email_config.json   — Gmail App Passwords  (key: profiles dict)
+  linkedin_data.db    — the scraper / campaign database
+"""
+
+import imaplib
+import smtplib
+import email
+import json
+import os
+import re
+import sqlite3
+import ssl
+import sys
+import time
+import logging
+from datetime import datetime, timedelta
+from email.message import EmailMessage
+from email.utils import parseaddr
+
+# =============================================
+# CONFIG
+# =============================================
+_SCRIPT_DIR      = os.path.dirname(os.path.abspath(__file__))
+SMTP_CONFIG_FILE = os.path.join(_SCRIPT_DIR, "email_config.json")
+DB_PATH          = os.path.join(_SCRIPT_DIR, "linkedin_data.db")
+
+# Each run gets its own timestamped log file inside a logs/ subfolder
+_LOG_DIR = os.path.join(_SCRIPT_DIR, "logs")
+os.makedirs(_LOG_DIR, exist_ok=True)
+LOG_FILE = os.path.join(
+    _LOG_DIR,
+    f"check_bounces_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
+)
+
+# IMAP / SMTP settings for Gmail
+IMAP_HOST = "imap.gmail.com"
+IMAP_PORT = 993
+SMTP_HOST = "smtp.gmail.com"
+SMTP_PORT = 465
+
+# Career replies are forwarded here
+TARGET_FORWARD_EMAIL = "sandeepjain200019@gmail.com"
+
+# Max career emails to forward per account per run (avoids spam flag risk)
+MAX_FORWARDS_PER_ACCOUNT = 5
+FORWARD_DELAY_SECS       = 60   # seconds between individual forwards
+
+# Look back this many days for UNSEEN emails
+LOOKBACK_DAYS = 30
+
+# Bounce sender patterns — emails from these senders indicate a bounce/NDR
+BOUNCE_SENDERS = [
+    "mailer-daemon@googlemail.com",
+    "mailer-daemon@google.com",
+    "postmaster@",
+    "mailer-daemon@",
+    "noreply@",
+    "no-reply@",
+    "mailer@",
+    "system@",
+    "administrator@",
+]
+
+# Subject patterns that indicate a bounce/NDR
+BOUNCE_SUBJECTS = [
+    "delivery status notification",
+    "undeliverable",
+    "mail delivery failed",
+    "returned mail",
+    "failure notice",
+    "delivery failure",
+    "non-delivery",
+    "message not delivered",
+    "unable to deliver",
+    "bounce",
+    "out of office",
+    "auto-reply",
+    "autoreply",
+]
+
+# Keywords that strongly suggest a genuine career-related reply
+CAREER_KEYWORDS = [
+    "job", "career", "profession", "opportunity", "interview", "application",
+    "resume", "cv", "hiring", "recruiter", "recruitment", "candidate",
+    "vacancy", "role", "position", "freelance", "contract", "full-time",
+    "part-time", "offer letter", "onboarding", "talent", "assessment",
+    "profile", "open application",
+]
+
+# Keywords that indicate marketing / newsletter junk — skip these even if
+# a career keyword also appears
+JUNK_KEYWORDS = [
+    "newsletter", "black friday", "cyber monday", "sale", "discount",
+    "limited time offer", "buy now", "promo code", "promotion", "marketing",
+    "unsubscribe", "special offer",
+]
+
+# =============================================
+# LOGGING
+# =============================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)-7s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(LOG_FILE, mode="w", encoding="utf-8"),
+    ]
+)
+logger = logging.getLogger("bounce_checker")
+logger.info(f"📄 Log file: {LOG_FILE}")
+
+# =============================================
+# DB HELPERS
+# =============================================
+
+def open_db() -> sqlite3.Connection:
+    if not os.path.exists(DB_PATH):
+        logger.error(f"Database not found: {DB_PATH}")
+        sys.exit(1)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS send_runs (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            script          TEXT,
+            started_at      TEXT,
+            finished_at     TEXT,
+            emails_sent     INTEGER DEFAULT 0,
+            emails_failed   INTEGER DEFAULT 0,
+            bounces_found   INTEGER DEFAULT 0,
+            country_filter  TEXT,
+            notes           TEXT
+        )
+    """)
+
+    # Tracks which emails have already been forwarded — avoids duplicate sends
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS processed_emails (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            execution_id    INTEGER,
+            account         TEXT,
+            original_sender TEXT,
+            subject         TEXT,
+            status          TEXT,
+            processed_at    TEXT
+        )
+    """)
+
+    conn.commit()
+    return conn
+
+
+def mark_bounced(conn: sqlite3.Connection, email_address: str) -> bool:
+    """Mark an email address as bounced. Returns True if a record was updated."""
+    cur = conn.execute(
+        "SELECT id, status FROM email_attempts WHERE email_address = ?",
+        (email_address.lower(),)
+    )
+    row = cur.fetchone()
+    if not row:
+        return False
+    if row["status"] == "bounced":
+        return False  # already marked
+
+    conn.execute("""
+        UPDATE email_attempts
+        SET    status = 'bounced',
+               bounce_detected_at = ?
+        WHERE  email_address = ?
+    """, (datetime.now().isoformat(), email_address.lower()))
+    conn.commit()
+    return True
+
+
+def get_all_sent_addresses(conn: sqlite3.Connection) -> set:
+    """Return all email addresses we sent to (status = sent or bounced)."""
+    cur = conn.execute("SELECT email_address FROM email_attempts")
+    return {row["email_address"].lower() for row in cur.fetchall()}
+
+
+def already_forwarded(conn: sqlite3.Connection, account: str,
+                      subject: str, sender: str) -> bool:
+    """True if this exact message was already forwarded in a previous run."""
+    cur = conn.execute(
+        """SELECT id FROM processed_emails
+           WHERE account = ? AND subject = ? AND original_sender = ?""",
+        (account, subject, sender)
+    )
+    return cur.fetchone() is not None
+
+
+def log_processed(conn: sqlite3.Connection, execution_id: int,
+                  account: str, sender: str, subject: str, status: str):
+    conn.execute("""
+        INSERT INTO processed_emails
+               (execution_id, account, original_sender, subject, status, processed_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (execution_id, account, sender, subject, status,
+          datetime.now().isoformat()))
+    conn.commit()
+
+
+# =============================================
+# IMAP / SSL HELPERS
+# =============================================
+
+def _make_ssl_context() -> ssl.SSLContext:
+    """Return an explicit TLS 1.2+ context — avoids SSL EOF on older defaults."""
+    ctx = ssl.create_default_context()
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    return ctx
+
+
+def _imap_connect(gmail_address: str, app_password: str) -> imaplib.IMAP4_SSL:
+    """Open a fresh IMAP4_SSL connection with an explicit TLS context."""
+    mail = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, ssl_context=_make_ssl_context())
+    mail.login(gmail_address, app_password)
+    mail.select("INBOX")
+    return mail
+
+
+# =============================================
+# BOUNCE DETECTION HELPERS
+# =============================================
+
+def is_bounce(msg) -> bool:
+    """Check if an email message is a bounce/NDR."""
+    sender  = (msg.get("From", "") or "").lower()
+    subject = (msg.get("Subject", "") or "").lower()
+
+    for pattern in BOUNCE_SENDERS:
+        if pattern in sender:
+            return True
+    for pattern in BOUNCE_SUBJECTS:
+        if pattern in subject:
+            return True
+    return False
+
+
+def extract_bounced_addresses(msg, known_addresses: set) -> list:
+    """
+    Extract the original recipient address from a bounce email.
+    Looks in dedicated headers first, then walks the body parts.
+    Only returns addresses we actually sent to (matched against known_addresses).
+    """
+    found = []
+
+    # Check headers first (fast path)
+    for header in ["X-Failed-Recipients", "Final-Recipient", "Original-Recipient"]:
+        val = msg.get(header, "") or ""
+        for addr in re.findall(r'[\w._%+\-]+@[\w.\-]+\.[a-zA-Z]{2,}', val):
+            if addr.lower() in known_addresses:
+                found.append(addr.lower())
+
+    # Walk body parts if headers didn't resolve it
+    if not found:
+        for part in msg.walk():
+            ct = part.get_content_type()
+            if ct in ("text/plain", "message/delivery-status"):
+                try:
+                    body = part.get_payload(decode=True)
+                    if body:
+                        body_str = body.decode("utf-8", errors="replace")
+                        for addr in re.findall(
+                            r'[\w._%+\-]+@[\w.\-]+\.[a-zA-Z]{2,}', body_str
+                        ):
+                            if addr.lower() in known_addresses:
+                                found.append(addr.lower())
+                except Exception:
+                    pass
+
+    return list(set(found))
+
+
+# =============================================
+# CAREER-REPLY FORWARDING HELPERS
+# =============================================
+
+def is_system_or_bounce_msg(msg) -> bool:
+    """Return True if the message is a bounce / system / auto-reply — skip forwarding."""
+    _, sender_email = parseaddr(msg.get("From", "") or "")
+    sender  = sender_email.lower()
+    subject = (msg.get("Subject", "") or "").lower()
+
+    if subject == "":           # empty subject = likely system mail
+        return True
+    for pattern in BOUNCE_SENDERS:
+        if pattern in sender:
+            return True
+    for pattern in BOUNCE_SUBJECTS:
+        if pattern in subject:
+            return True
+    return False
+
+
+def is_career_related(subject: str, body: str) -> bool:
+    """
+    Return True if the email looks like a genuine career-related reply.
+    Priority: 'Sandeep Jain' in subject → always forward.
+    Junk keywords in subject → never forward.
+    Career keywords in subject or body → forward.
+    """
+    subject_lower = subject.lower()
+    body_lower    = body.lower()
+
+    if "sandeep jain" in subject_lower:
+        return True
+
+    for word in JUNK_KEYWORDS:
+        if word in subject_lower:
+            return False
+
+    for word in CAREER_KEYWORDS:
+        if word in subject_lower or word in body_lower:
+            return True
+
+    return False
+
+
+def extract_body(msg, html: bool = False) -> str:
+    """Extract plain-text or HTML body from an email message."""
+    target_type = "text/html" if html else "text/plain"
+    body = ""
+    if msg.is_multipart():
+        for part in msg.walk():
+            if (part.get_content_type() == target_type
+                    and not str(part.get("Content-Disposition", "")).startswith("attachment")):
+                payload = part.get_payload(decode=True)
+                if payload:
+                    body += payload.decode(errors="replace") + "\n"
+    else:
+        if msg.get_content_type() == target_type:
+            payload = msg.get_payload(decode=True)
+            if payload:
+                body = payload.decode(errors="replace")
+    return body
+
+
+def create_forward_message(original_msg, from_addr: str, to_addr: str) -> EmailMessage:
+    """Build a forwarded EmailMessage from the original."""
+    fwd = EmailMessage()
+    orig_subject = (original_msg.get("Subject", "No Subject") or "No Subject")
+    orig_subject = orig_subject.replace("\r", "").replace("\n", "")
+    fwd["Subject"] = f"Fwd: {orig_subject}"
+    fwd["From"]    = from_addr
+    fwd["To"]      = to_addr
+
+    comment = (
+        f"--- Automated Forwarding from {from_addr} ---\n"
+        f"Original Sender: {original_msg.get('From', 'Unknown')}\n"
+        f"Date: {original_msg.get('Date', 'Unknown')}\n"
+    )
+
+    plain_body = extract_body(original_msg, html=False)
+    html_body  = extract_body(original_msg, html=True)
+
+    if not plain_body and html_body:
+        fwd.set_content(comment + "\n[Original email was HTML. See below.]")
+        comment_html = comment.replace("\n", "<br>")
+        fwd.add_alternative(
+            f"<div style='background:#f0f0f0;padding:10px;margin-bottom:10px;'>"
+            f"<b>{comment_html}</b></div>{html_body}",
+            subtype="html"
+        )
+    elif plain_body and html_body:
+        fwd.set_content(comment + "\n\n" + plain_body)
+        comment_html = comment.replace("\n", "<br>")
+        fwd.add_alternative(
+            f"<div style='background:#f0f0f0;padding:10px;margin-bottom:10px;'>"
+            f"<b>{comment_html}</b></div>{html_body}",
+            subtype="html"
+        )
+    else:
+        fwd.set_content(comment + "\n\n" + (
+            plain_body if plain_body else "[Could not decode original email body]"
+        ))
+
+    return fwd
+
+
+# =============================================
+# PER-ACCOUNT PROCESSING
+# =============================================
+
+def process_account(gmail_address: str, app_password: str,
+                    known_addresses: set,
+                    conn: sqlite3.Connection,
+                    execution_id: int) -> dict:
+    """
+    For one Gmail account:
+      - Run bounce detection (two-pass: headers then full RFC822)
+      - Run career-reply forwarding (BODY.PEEK[] — leaves emails UNREAD)
+
+    Returns a dict with counts: bounces_detected, bounces_new, forwards_sent, errors
+    """
+    stats = dict(bounces_detected=0, bounces_new=0, forwards_sent=0, errors=0)
+
+    # ── Connect ────────────────────────────────────────────────────────────
+    try:
+        logger.info(f"\n  Connecting to {gmail_address}...")
+        mail = _imap_connect(gmail_address, app_password)
+    except imaplib.IMAP4.error as e:
+        logger.error(f"  IMAP auth error for {gmail_address}: {e}")
+        stats["errors"] += 1
+        return stats
+    except Exception as e:
+        logger.error(f"  Connection error for {gmail_address}: {e}")
+        stats["errors"] += 1
+        return stats
+
+    since_date = (datetime.now() - timedelta(days=LOOKBACK_DAYS)).strftime("%d-%b-%Y")
+
+    # ==========================================================
+    # PHASE 1 — BOUNCE DETECTION
+    # ==========================================================
+    logger.info(f"  [Phase 1] Bounce detection...")
+
+    bounce_search_terms = [
+        f'(UNSEEN SINCE {since_date} FROM "mailer-daemon")',
+        f'(UNSEEN SINCE {since_date} FROM "postmaster")',
+        f'(UNSEEN SINCE {since_date} SUBJECT "delivery status")',
+        f'(UNSEEN SINCE {since_date} SUBJECT "undeliverable")',
+        f'(UNSEEN SINCE {since_date} SUBJECT "mail delivery failed")',
+        f'(UNSEEN SINCE {since_date} SUBJECT "failure notice")',
+    ]
+
+    bounce_ids = set()
+    for term in bounce_search_terms:
+        try:
+            _, ids = mail.search(None, term)
+            if ids and ids[0]:
+                bounce_ids.update(ids[0].split())
+        except Exception:
+            pass
+
+    logger.info(f"  Found {len(bounce_ids)} potential bounce email(s)")
+
+    bounce_ids_list = list(bounce_ids)
+    reconnects      = 0
+
+    # ── Pass 1a: header-only pre-filter ────────────────────────
+    HDRFETCH    = "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT X-FAILED-RECIPIENTS)])"
+    relevant_ids = []
+    logger.info(f"  Pass 1a: scanning headers of {len(bounce_ids_list)} email(s)...")
+
+    i = 0
+    while i < len(bounce_ids_list):
+        msg_id = bounce_ids_list[i]
+        try:
+            if i > 0 and i % 100 == 0:
+                try:
+                    mail.noop()
+                except Exception:
+                    pass
+                logger.info(f"    ...{i}/{len(bounce_ids_list)} headers done")
+
+            _, hdr_data = mail.fetch(msg_id, HDRFETCH)
+            if not hdr_data or not isinstance(hdr_data[0], tuple):
+                i += 1
+                continue
+            raw_hdr = hdr_data[0][1]
+            if not isinstance(raw_hdr, bytes):
+                i += 1
+                continue
+
+            h        = email.message_from_bytes(raw_hdr)
+            sender   = (h.get("From", "") or "").lower()
+            subject  = (h.get("Subject", "") or "").lower()
+            failed_r = (h.get("X-Failed-Recipients", "") or "").lower()
+
+            if (any(p in sender  for p in BOUNCE_SENDERS)
+                    or any(p in subject for p in BOUNCE_SUBJECTS)
+                    or bool(failed_r)):
+                relevant_ids.append(msg_id)
+
+            i += 1
+
+        except (ssl.SSLError, OSError, imaplib.IMAP4.abort) as e:
+            if reconnects >= 3:
+                logger.warning(f"  Too many reconnects (pass 1a); skipping {msg_id}: {e}")
+                i += 1
+                continue
+            reconnects += 1
+            logger.warning(f"  Connection dropped (attempt {reconnects}/3), reconnecting...")
+            time.sleep(2 * reconnects)
+            try:
+                mail = _imap_connect(gmail_address, app_password)
+            except Exception as re_err:
+                logger.error(f"  Reconnect failed: {re_err}")
+                break
+        except Exception as e:
+            logger.warning(f"  Could not read header {msg_id}: {e}")
+            i += 1
+
+    logger.info(f"  Pass 1a done — {len(relevant_ids)}/{len(bounce_ids_list)} need full fetch.")
+
+    # ── Pass 1b: full RFC822 for confirmed bounce candidates ───
+    reconnects = 0
+    i = 0
+    while i < len(relevant_ids):
+        msg_id = relevant_ids[i]
+        try:
+            _, data = mail.fetch(msg_id, "(RFC822)")
+            if not data or not isinstance(data[0], tuple):
+                i += 1
+                continue
+            raw = data[0][1]
+            if not isinstance(raw, bytes):
+                i += 1
+                continue
+
+            msg = email.message_from_bytes(raw)
+
+            if is_bounce(msg):
+                addresses = extract_bounced_addresses(msg, known_addresses)
+                if addresses:
+                    # Belongs to our LinkedIn campaign
+                    for addr in addresses:
+                        logger.info(f"  📧 Bounce detected: {addr}")
+                        stats["bounces_detected"] += 1
+                        if mark_bounced(conn, addr):
+                            stats["bounces_new"] += 1
+                            logger.info(f"  ✓  Marked bounced: {addr}")
+                        else:
+                            logger.info(f"  ⏭️  Already marked: {addr}")
+                    # Mark as read so we don't re-scan this bounce
+                    try:
+                        mail.store(msg_id, "+FLAGS", "\\Seen")
+                    except Exception:
+                        pass
+                # else: bounce from a different campaign — leave completely untouched
+
+            i += 1
+
+        except (ssl.SSLError, OSError, imaplib.IMAP4.abort) as e:
+            if reconnects >= 3:
+                logger.warning(f"  Too many reconnects (pass 1b); skipping {msg_id}: {e}")
+                i += 1
+                continue
+            reconnects += 1
+            logger.warning(f"  Connection dropped (attempt {reconnects}/3), reconnecting...")
+            time.sleep(2 * reconnects)
+            try:
+                mail = _imap_connect(gmail_address, app_password)
+            except Exception as re_err:
+                logger.error(f"  Reconnect failed: {re_err}")
+                break
+        except Exception as e:
+            logger.warning(f"  Could not read message {msg_id}: {e}")
+            i += 1
+
+    # ==========================================================
+    # PHASE 2 — CAREER-REPLY FORWARDING
+    # ==========================================================
+    logger.info(f"  [Phase 2] Career-reply forwarding...")
+
+    # Skip the target inbox itself
+    if gmail_address.lower() == TARGET_FORWARD_EMAIL.lower():
+        logger.info(f"  Skipping forwarding pass — this IS the target inbox.")
+    else:
+        try:
+            # Fetch all UNSEEN messages (not just bounce-keyword searches)
+            _, unread_data = mail.search(None, f"(UNSEEN SINCE {since_date})")
+            unread_ids = unread_data[0].split() if unread_data and unread_data[0] else []
+            logger.info(f"  {len(unread_ids)} unread email(s) to scan for career replies")
+
+            forward_count = 0
+
+            # Set up SMTP for this account (only if there are unread emails)
+            smtp_conn = None
+            if unread_ids:
+                try:
+                    smtp_conn = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT,
+                                                  context=_make_ssl_context())
+                    smtp_conn.login(gmail_address, app_password)
+                except Exception as smtp_err:
+                    logger.error(f"  SMTP connect failed for {gmail_address}: {smtp_err}")
+                    smtp_conn = None
+
+            for msg_id in unread_ids:
+                if forward_count >= MAX_FORWARDS_PER_ACCOUNT:
+                    logger.info(f"  🛑 Reached forward limit ({MAX_FORWARDS_PER_ACCOUNT}) "
+                                f"for this account. Remaining deferred.")
+                    break
+
+                try:
+                    # BODY.PEEK[] — does NOT mark the email as read
+                    _, msg_data = mail.fetch(msg_id, "(BODY.PEEK[])")
+                    if not msg_data or not isinstance(msg_data[0], tuple):
+                        continue
+                    raw_email = msg_data[0][1]
+                    if not isinstance(raw_email, bytes):
+                        continue
+
+                    email_message  = email.message_from_bytes(raw_email)
+                    orig_subject   = (email_message.get("Subject", "No Subject") or "No Subject")
+                    orig_subject   = orig_subject.replace("\r", "").replace("\n", "")
+                    orig_sender    = email_message.get("From", "Unknown")
+
+                    # Skip if we already forwarded this in a previous run
+                    if already_forwarded(conn, gmail_address, orig_subject, orig_sender):
+                        logger.info(f"  ⏭️  Already forwarded: {orig_subject}")
+                        continue
+
+                    # Skip system / bounce emails
+                    if is_system_or_bounce_msg(email_message):
+                        logger.info(f"  ⏭️  Skipped system/bounce: {orig_subject}")
+                        log_processed(conn, execution_id, gmail_address,
+                                      orig_sender, orig_subject, "skipped_bounce")
+                        continue
+
+                    # Extract body for keyword matching
+                    plain_text = extract_body(email_message, html=False)
+                    html_text  = extract_body(email_message, html=True)
+                    combined   = plain_text + " " + html_text
+
+                    if not is_career_related(orig_subject, combined):
+                        logger.info(f"  ⏭️  Skipped non-career: {orig_subject}")
+                        log_processed(conn, execution_id, gmail_address,
+                                      orig_sender, orig_subject, "skipped_non_career")
+                        continue
+
+                    # Career-related — forward it
+                    if smtp_conn is None:
+                        logger.warning(f"  ⚠️  No SMTP connection — cannot forward: {orig_subject}")
+                        stats["errors"] += 1
+                        continue
+
+                    logger.info(f"  ➔  Forwarding: {orig_subject}  (from {orig_sender})")
+                    fwd_msg = create_forward_message(email_message, gmail_address,
+                                                     TARGET_FORWARD_EMAIL)
+                    smtp_conn.send_message(fwd_msg)
+                    log_processed(conn, execution_id, gmail_address,
+                                  orig_sender, orig_subject, "forwarded")
+                    stats["forwards_sent"] += 1
+                    forward_count += 1
+
+                    # Pause between forwards to avoid rate-limiting
+                    if forward_count < MAX_FORWARDS_PER_ACCOUNT:
+                        logger.info(f"  ⏳ Waiting {FORWARD_DELAY_SECS}s before next forward...")
+                        time.sleep(FORWARD_DELAY_SECS)
+
+                except Exception as e:
+                    logger.error(f"  Error processing message {msg_id}: {e}")
+                    stats["errors"] += 1
+
+            if smtp_conn:
+                try:
+                    smtp_conn.quit()
+                except Exception:
+                    pass
+
+        except Exception as e:
+            logger.error(f"  Error in Phase 2 for {gmail_address}: {e}")
+            stats["errors"] += 1
+
+    # ── Disconnect ─────────────────────────────────────────────
+    try:
+        mail.logout()
+    except Exception:
+        pass
+
+    return stats
+
+
+# =============================================
+# MAIN
+# =============================================
+
+def main():
+    os.system("cls" if os.name == "nt" else "clear")
+    logger.info("=" * 60)
+    logger.info("  BOUNCE CHECKER + CAREER-REPLY FORWARDER")
+    logger.info(f"  Run: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info("=" * 60)
+
+    # Load config
+    if not os.path.exists(SMTP_CONFIG_FILE):
+        logger.error(f"Config not found: {SMTP_CONFIG_FILE}")
+        return
+
+    with open(SMTP_CONFIG_FILE) as f:
+        config = json.load(f)
+    smtp_passwords = config.get("profiles", {})
+    logger.info(f"  {len(smtp_passwords)} Gmail account(s) to process")
+
+    # Open DB
+    conn = open_db()
+    known_addresses = get_all_sent_addresses(conn)
+    logger.info(f"  {len(known_addresses)} email addresses in campaign DB")
+
+    if not known_addresses:
+        logger.info("  No sent emails in DB — run a send campaign first.")
+
+    # Log this run
+    cur = conn.execute(
+        "INSERT INTO send_runs (script, started_at) VALUES ('bounce_checker', ?)",
+        (datetime.now().isoformat(),)
+    )
+    conn.commit()
+    bounce_run_id = cur.lastrowid
+
+    # Also create an execution record for the forwarding tracker
+    cur2 = conn.execute(
+        "INSERT INTO processed_emails (execution_id, account, original_sender, "
+        "subject, status, processed_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (None, "__run_start__", "", "", "run_start", datetime.now().isoformat())
+    )
+    # We'll use bounce_run_id as execution_id throughout
+    conn.commit()
+
+    # ── Process each account ───────────────────────────────────
+    total_bounces_detected = 0
+    total_bounces_new      = 0
+    total_forwards         = 0
+    total_errors           = 0
+
+    for gmail_address, app_password in smtp_passwords.items():
+        logger.info(f"\n{'─'*55}")
+        logger.info(f"  Account: {gmail_address}")
+        logger.info(f"{'─'*55}")
+
+        result = process_account(
+            gmail_address, app_password,
+            known_addresses, conn, bounce_run_id
+        )
+        total_bounces_detected += result["bounces_detected"]
+        total_bounces_new      += result["bounces_new"]
+        total_forwards         += result["forwards_sent"]
+        total_errors           += result["errors"]
+
+    # ── Summary ────────────────────────────────────────────────
+    logger.info("\n" + "=" * 60)
+    logger.info("  SUMMARY")
+    logger.info(f"  Bounces found     : {total_bounces_detected}")
+    logger.info(f"  New in DB         : {total_bounces_new}")
+    logger.info(f"  Already marked    : {total_bounces_detected - total_bounces_new}")
+    logger.info(f"  Emails forwarded  : {total_forwards}  →  {TARGET_FORWARD_EMAIL}")
+    logger.info(f"  Errors            : {total_errors}")
+    logger.info("=" * 60)
+
+    conn.execute("""
+        UPDATE send_runs
+        SET finished_at = ?, bounces_found = ?, notes = ?
+        WHERE id = ?
+    """, (
+        datetime.now().isoformat(),
+        total_bounces_new,
+        f"{total_bounces_detected} bounce emails found, {total_bounces_new} new, "
+        f"{total_forwards} career replies forwarded",
+        bounce_run_id
+    ))
+    conn.commit()
+
+    if total_bounces_new > 0:
+        logger.info("\n  Next send run will skip bounced formats and try the next one.")
+
+        cur = conn.execute("""
+            SELECT ea.employee_name, ea.company_name, ea.company_domain,
+                   ea.email_format AS bounced_format
+            FROM   email_attempts ea
+            WHERE  ea.status = 'bounced'
+            ORDER  BY ea.company_name
+        """)
+        rows = cur.fetchall()
+        if rows:
+            logger.info(f"\n  Contacts to retry ({len(rows)}):")
+            for row in rows:
+                logger.info(
+                    f"    {row['employee_name']} @ {row['company_domain']}"
+                    f"  (bounced: {row['bounced_format']})"
+                )
+
+    if total_forwards > 0:
+        logger.info(f"\n  {total_forwards} career reply email(s) forwarded to "
+                    f"{TARGET_FORWARD_EMAIL} — check your inbox.")
+
+    conn.close()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\n  Cancelled.")
+    except Exception as e:
+        import traceback
+        logger.error(f"Fatal error: {e}")
+        traceback.print_exc()
+    finally:
+        input("\n  Press Enter to exit...")

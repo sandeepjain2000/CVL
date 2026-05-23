@@ -34,17 +34,27 @@ from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from itertools import zip_longest
+from contextlib import contextmanager
+from typing import Generator
 
 # =============================================
 # CONFIGURATION — edit these as needed
 # =============================================
 
-DB_PATH           = "linkedin_data.db"
-CREDENTIALS_FILE  = "credentials_FINAL.json"
-SMTP_CONFIG_FILE  = "email_config.json"
-TEMPLATE_FILE     = "email_template_with_link.htm"
-PROGRESS_FILE     = "email_progress_linkedin.json"
-LOG_FILE          = "send_linkedin_campaigns.log"
+_SCRIPT_DIR       = os.path.dirname(os.path.abspath(__file__))
+DB_PATH           = os.path.join(_SCRIPT_DIR, "data", "db", "linkedin_data.db")
+CREDENTIALS_FILE  = os.path.join(_SCRIPT_DIR, "data", "json", "credentials_FINAL.json")
+SMTP_CONFIG_FILE  = r"C:\Users\sandeep\Downloads\Claudes\EmailJson\email_config.json"
+TEMPLATE_FILE     = os.path.join(_SCRIPT_DIR, "templates", "email_template_with_link.htm")
+PROGRESS_FILE     = os.path.join(_SCRIPT_DIR, "data", "json", "email_progress_linkedin.json")
+
+# Each run gets its own timestamped log file inside a logs/ subfolder
+_LOG_DIR  = os.path.join(_SCRIPT_DIR, "logs")
+os.makedirs(_LOG_DIR, exist_ok=True)
+LOG_FILE  = os.path.join(
+    _LOG_DIR,
+    f"send_linkedin_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
+)
 
 MAX_EMAILS        = 200   # cap per run
 ENABLE_RESUME     = True  # skip already-sent emails
@@ -85,8 +95,8 @@ def setup_logger() -> logging.Logger:
     ch.setLevel(logging.INFO)
     ch.setFormatter(fmt)
 
-    # File handler — appends so history is preserved across runs
-    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    # File handler — write mode so each run gets a clean file
+    fh = logging.FileHandler(LOG_FILE, mode="w", encoding="utf-8")
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(fmt)
 
@@ -95,6 +105,39 @@ def setup_logger() -> logging.Logger:
     return logger
 
 logger = setup_logger()
+
+
+# ---------------------------------------------------------------------------
+# WINDOWS SLEEP PREVENTION  —  keeps script running by preventing idle sleep
+# ---------------------------------------------------------------------------
+@contextmanager
+def prevent_windows_sleep() -> Generator[None, None, None]:
+    """
+    Context manager to prevent Windows from entering sleep mode (system suspend)
+    due to inactivity while the sender is running. The display is still
+    allowed to turn off normally.
+    """
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ES_CONTINUOUS = 0x80000000
+            ES_SYSTEM_REQUIRED = 0x00000001
+            logger.info("Setting Windows thread execution state to prevent sleep...")
+            ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+            yield
+        except Exception as e:
+            logger.warning("Could not set Windows execution state to prevent sleep: %s", e)
+            yield
+        finally:
+            logger.info("Restoring Windows sleep behavior...")
+            try:
+                import ctypes
+                ES_CONTINUOUS = 0x80000000
+                ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+            except Exception as e:
+                logger.error("Failed to restore Windows sleep state: %s", e)
+    else:
+        yield
 
 # =============================================
 # DATABASE HELPERS
@@ -298,14 +341,14 @@ def already_sent(progress: dict, email: str, company: str) -> bool:
 
 EMAIL_FORMATS = [
     "firstname.lastname",       # john.smith@domain
-    "firstname",                # john@domain
-    "firstinitial.lastname",    # j.smith@domain
-    "firstname.lastinitial",    # john.s@domain
+    # "firstname",                # john@domain
+    # "firstinitial.lastname",    # j.smith@domain
+    # "firstname.lastinitial",    # john.s@domain
 ]
 
 def get_db_conn():
     """Open linkedin_data.db in same folder as this script."""
-    db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "linkedin_data.db")
+    db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "db", "linkedin_data.db")
     if not os.path.exists(db_path):
         return None
     import sqlite3 as _sq
@@ -326,8 +369,106 @@ def get_db_conn():
             from_profile        TEXT
         )
     """)
+    _migrate_zerobounce_schema(conn)
     conn.commit()
     return conn
+
+
+def _migrate_zerobounce_schema(conn) -> None:
+    """Add zerobounce_validation table and optional columns on email_attempts."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS zerobounce_validation (
+            email_address    TEXT PRIMARY KEY,
+            zb_status        TEXT,
+            zb_sub_status    TEXT,
+            zb_account       TEXT,
+            zb_free_email    TEXT,
+            source_batch     TEXT,
+            imported_at      TEXT
+        )
+    """)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(email_attempts)")}
+    for col, decl in (
+        ("zb_status", "TEXT"),
+        ("zb_sub_status", "TEXT"),
+        ("zb_account", "TEXT"),
+        ("zb_free_email", "TEXT"),
+        ("zb_validated_at", "TEXT"),
+    ):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE email_attempts ADD COLUMN {col} {decl}")
+
+
+def _normalize_zb_csv_row(row: dict) -> dict:
+    """Strip BOM / stray quotes from ZeroBounce CSV column names."""
+    out = {}
+    for k, v in row.items():
+        key = (k or "").replace("\ufeff", "").strip().strip('"')
+        out[key] = v
+    return out
+
+
+def import_zerobounce_csv(conn, csv_path: str, source_batch: str = "phase1") -> tuple[int, int]:
+    """
+    Load a ZeroBounce export CSV into zerobounce_validation and refresh zb_* on
+    email_attempts when that address already exists.
+
+    Returns (rows_imported, email_attempts_updated).
+    """
+    if not conn:
+        return 0, 0
+    import csv
+
+    _migrate_zerobounce_schema(conn)
+    conn.commit()
+
+    now = datetime.now().isoformat()
+    imported = 0
+    attempts_updated = 0
+
+    with open(csv_path, newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        for raw in reader:
+            row = _normalize_zb_csv_row(raw)
+            email = (row.get("Email Address") or "").strip().lower()
+            if not email:
+                continue
+            zb_status = (row.get("ZB Status") or "").strip()
+            zb_sub = (row.get("ZB Sub status") or "").strip()
+            zb_acct = (row.get("ZB Account") or "").strip()
+            zb_free = (row.get("ZB Free Email") or "").strip()
+
+            conn.execute("""
+                INSERT INTO zerobounce_validation
+                    (email_address, zb_status, zb_sub_status, zb_account,
+                     zb_free_email, source_batch, imported_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(email_address) DO UPDATE SET
+                    zb_status     = excluded.zb_status,
+                    zb_sub_status = excluded.zb_sub_status,
+                    zb_account    = excluded.zb_account,
+                    zb_free_email = excluded.zb_free_email,
+                    source_batch  = excluded.source_batch,
+                    imported_at   = excluded.imported_at
+            """, (email, zb_status, zb_sub, zb_acct, zb_free, source_batch, now))
+
+            cur = conn.execute(
+                """
+                UPDATE email_attempts
+                SET    zb_status        = ?,
+                       zb_sub_status    = ?,
+                       zb_account       = ?,
+                       zb_free_email    = ?,
+                       zb_validated_at  = ?
+                WHERE  lower(email_address) = ?
+                """,
+                (zb_status, zb_sub, zb_acct, zb_free, now, email),
+            )
+            attempts_updated += cur.rowcount
+            imported += 1
+
+    conn.commit()
+    return imported, attempts_updated
 
 
 def log_email_attempt(conn, employee_name: str, company_name: str,
@@ -378,6 +519,22 @@ def already_attempted(conn, email_address: str) -> bool:
         return cur.fetchone() is not None
     except Exception:
         return False
+
+
+def get_emails_sent_today(conn, from_email: str) -> int:
+    """Return the number of emails sent from a profile today."""
+    if not conn:
+        return 0
+    today_prefix = datetime.now().strftime("%Y-%m-%d")
+    try:
+        cur = conn.execute(
+            "SELECT COUNT(*) FROM email_attempts WHERE lower(from_profile) = ? AND sent_timestamp LIKE ?",
+            (from_email.lower(), f"{today_prefix}%")
+        )
+        return cur.fetchone()[0]
+    except Exception as e:
+        logger.warning(f"Could not check today's sent count for {from_email}: {e}")
+        return 0
 
 
 def build_email_address(first: str, last: str, domain: str, fmt: str) -> str:
@@ -457,10 +614,19 @@ def build_email_list(companies: list, progress: dict, db_conn=None) -> list:
         if not domain:
             continue
 
-        # Skip if company already contacted via progress file
+        # Skip if company already contacted — unless a bounce retry is needed
         if already_sent(progress, "", name):
-            logger.info(f"  ⏭️  Skipping {name} (already contacted)")
-            continue
+            has_bounced = False
+            if db_conn:
+                cur = db_conn.execute(
+                    "SELECT 1 FROM email_attempts WHERE company_domain = ? AND status = 'bounced' LIMIT 1",
+                    (domain,)
+                )
+                has_bounced = cur.fetchone() is not None
+            if not has_bounced:
+                logger.info(f"  ⏭️  Skipping {name} (already contacted, no bounces)")
+                continue
+            logger.info(f"  🔄 {name} — bounced email detected, checking for retry formats...")
 
         if not domain_resolves(domain):
             logger.error(f"  ❌ {name}: domain {domain!r} does not resolve — skipped")
@@ -483,23 +649,25 @@ def build_email_list(companies: list, progress: dict, db_conn=None) -> list:
 
             # Find which formats have already bounced for this person
             bounced = get_bounced_formats(db_conn, domain, emp["full_name"])
+            logger.info(f"    🔍 {emp['full_name']} — bounced formats: {bounced or 'none'}")
 
             # Pick the first format not yet bounced and not yet attempted
             chosen_email = None
             chosen_format = None
             for fmt in EMAIL_FORMATS:
                 if fmt in bounced:
-                    logger.info(f"    ↩️  {fmt} bounced previously — skipping")
+                    logger.info(f"    ↩️  [{fmt}] bounced — skipping")
                     continue
                 candidate = build_email_address(first, last, domain, fmt)
                 if already_attempted(db_conn, candidate):
-                    logger.info(f"    ⏭️  {candidate} already attempted")
+                    logger.info(f"    ⏭️  [{fmt}] {candidate} already attempted")
                     continue
-                if already_sent(progress, candidate, name):
-                    logger.info(f"    ⏭️  {candidate} already sent (progress file)")
+                if candidate.lower() in progress["sent_emails"]:
+                    logger.info(f"    ⏭️  [{fmt}] {candidate} already in progress file")
                     continue
                 chosen_email  = candidate
                 chosen_format = fmt
+                logger.info(f"    ➡️  [{fmt}] selected: {candidate}")
                 break
 
             if not chosen_email:
@@ -521,25 +689,23 @@ def build_email_list(companies: list, progress: dict, db_conn=None) -> list:
             added_for_company += 1
             logger.info(f"    ✅ [{chosen_format}] {chosen_email} ({emp['job_title']})")
 
-        # Generic info@ fallback disabled — staff emails only
-        # if added_for_company == 0 and len(emails) < MAX_EMAILS:
-        #     info_email = f"info@{domain}"
-        #     if not already_attempted(db_conn, info_email) and         #        not already_sent(progress, info_email, name):
-        #         emails.append({
-        #             "recipient":       info_email,
-        #             "salutation":      f"{name} Team",
-        #             "company":         name,
-        #             "company_context": generate_company_context(name),
-        #             "subject":         generate_subject(name),
-        #             "email_type":      "generic_info",
-        #             "domain":          domain,
-        #             "person_name":     "",
-        #             "job_title":       "",
-        #             "email_format":    "generic_info",
-        #         })
-        #         logger.info(f"    🔄 Fallback: {info_email}")
-        if added_for_company == 0:
-            logger.info(f"    ⊘  No employees found for {name} — skipped (generic disabled)")
+        # Fallback: info@ if no staff emails added
+        if added_for_company == 0 and len(emails) < MAX_EMAILS:
+            info_email = f"info@{domain}"
+            if not already_attempted(db_conn, info_email) and                not already_sent(progress, info_email, name):
+                emails.append({
+                    "recipient":       info_email,
+                    "salutation":      f"{name} Team",
+                    "company":         name,
+                    "company_context": generate_company_context(name),
+                    "subject":         generate_subject(name),
+                    "email_type":      "generic_info",
+                    "domain":          domain,
+                    "person_name":     "",
+                    "job_title":       "",
+                    "email_format":    "generic_info",
+                })
+                logger.info(f"    🔄 Fallback: {info_email}")
 
         if len(emails) >= MAX_EMAILS:
             break
@@ -711,6 +877,28 @@ def main():
         logger.info("\n  ❌ No active profiles with SMTP passwords found.")
         conn.close()
         return
+
+    # ── Check daily send limits (max 30 per profile) ─────────────────────
+    db_conn = get_db_conn()
+    if db_conn:
+        logger.info("\n  Checking daily send limits (max 30 per profile):")
+        remaining_profiles = []
+        for p in active_profiles:
+            sent_today = get_emails_sent_today(db_conn, p["email"])
+            p["sent_today"] = sent_today
+            status_str = f"{sent_today}/30 sent today"
+            if sent_today >= 30:
+                logger.info(f"    Profile {p['name']}: {status_str} 🛑 (LIMIT REACHED - skipping profile for this run)")
+            else:
+                logger.info(f"    Profile {p['name']}: {status_str} ✅ ({30 - sent_today} remaining)")
+                remaining_profiles.append(p)
+        active_profiles = remaining_profiles
+        db_conn.close()
+
+    if not active_profiles:
+        logger.info("\n  ❌ No active profiles available to send (all reached daily limit of 30).")
+        conn.close()
+        return
     logger.info(f"  ✓ {len(active_profiles)} sending profile(s) ready")
 
     # ── Load progress ────────────────────────────────────────────────────
@@ -806,6 +994,11 @@ def main():
         profile      = active_profiles[prof_idx]
         smtp_password = smtp_passwords[profile["email"]]
 
+        # Enforce hard daily limit of 30 sends
+        if profile.get("sent_today", 0) >= 30:
+            logger.warning(f"  ⚠️ Profile {profile['email']} has reached the daily limit of 30 sends (sent today: {profile['sent_today']}). Skipping email to {email_data['recipient']}.")
+            continue
+
         if prev_prof_idx is not None and prof_idx != prev_prof_idx:
             logger.info(f"\n  🔄 Switching to Profile {prof_idx+1} ({profile['name']}) "
 f"— waiting {PROFILE_SWITCH_DELAY}s...")
@@ -818,6 +1011,7 @@ f"{email_data['company']}{person}")
 
         if send_one(smtp_password, profile["email"], email_data, progress, db_conn):
             total_success += 1
+            profile["sent_today"] = profile.get("sent_today", 0) + 1
             # Batch break
             if total_success > 0 and total_success % EMAIL_BATCH_SIZE == 0:
                 logger.info(f"\n  🛑 Batch break after {total_success} sent — "
@@ -843,7 +1037,8 @@ f"waiting {EMAIL_BATCH_BREAK}s...")
 
 if __name__ == "__main__":
     try:
-        main()
+        with prevent_windows_sleep():
+            main()
     except KeyboardInterrupt:
         logger.info("\n\n  Cancelled — progress saved.")
     except Exception as e:
