@@ -45,12 +45,17 @@ Usage
 -----
   pip install playwright
   playwright install firefox
-  python linkedin_scraper.py
-  python linkedin_scraper.py --test    # 1 company, 1 employee (also --Test, --TEST)
+  python linkedin_scraper.py              # test mode; Chromium (cookies from Firefox profile)
+  python linkedin_scraper.py --run        # production caps (20 companies, etc.)
+  python linkedin_scraper.py --browser firefox   # force Playwright Firefox (often fails on GPU)
+  python linkedin_scraper.py --login      # force login in browser (works with either mode)
+  python linkedin_scraper.py --firefox-profile "C:\\...\\Profiles\\..."
 """
 
 import argparse
 import asyncio
+import json
+import os
 import sys
 import csv
 import logging
@@ -79,10 +84,11 @@ def beep_error() -> None:
     winsound.Beep(300, 400)    # 300 Hz, 400 ms
 
 def beep_done() -> None:
-    """Rising triple beep — entire run finished."""
+    """Rising triple beep + long finish tone — entire run finished."""
     winsound.Beep(600, 200)
     winsound.Beep(900, 200)
     winsound.Beep(1200, 400)
+    winsound.Beep(750, 2000)   # extra-long final beep (~2 s) — execution complete
 
 
 # ---------------------------------------------------------------------------
@@ -95,27 +101,25 @@ def prevent_windows_sleep() -> Generator[None, None, None]:
     due to inactivity while the scraper is running. The display is still
     allowed to turn off normally.
     """
-    if sys.platform == "win32":
-        try:
-            import ctypes
-            ES_CONTINUOUS = 0x80000000
-            ES_SYSTEM_REQUIRED = 0x00000001
-            logger.info("Setting Windows thread execution state to prevent sleep...")
-            ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
-            yield
-        except Exception as e:
-            logger.warning("Could not set Windows execution state to prevent sleep: %s", e)
-            yield
-        finally:
-            logger.info("Restoring Windows sleep behavior...")
-            try:
-                import ctypes
-                ES_CONTINUOUS = 0x80000000
-                ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
-            except Exception as e:
-                logger.error("Failed to restore Windows sleep state: %s", e)
-    else:
+    if sys.platform != "win32":
         yield
+        return
+    import ctypes
+    ES_CONTINUOUS = 0x80000000
+    ES_SYSTEM_REQUIRED = 0x00000001
+    try:
+        logger.info("Setting Windows thread execution state to prevent sleep...")
+        ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+    except Exception as e:
+        logger.warning("Could not set Windows execution state to prevent sleep: %s", e)
+    try:
+        yield
+    finally:
+        logger.info("Restoring Windows sleep behavior...")
+        try:
+            ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+        except Exception as e:
+            logger.error("Failed to restore Windows sleep state: %s", e)
 
 from playwright.async_api import (
     Error as PlaywrightError,
@@ -151,13 +155,17 @@ DB_FILE         = str((Path(__file__).parent / "data" / "db" / "linkedin_data.db
 Path(SESSION_FILE).parent.mkdir(parents=True, exist_ok=True)
 Path(DB_FILE).parent.mkdir(parents=True, exist_ok=True)
 
-# Your REAL Firefox profile — cookies are read from here (never written back)
+# Firefox profile "scraper" (Profile Manager) — cookies copied from here each run.
+# Override per run with: --firefox-profile "C:\...\Profiles\..."
 FIREFOX_PROFILE_DIR    = (
     r"C:\Users\sandeep\AppData\Roaming\Mozilla\Firefox\Profiles"
-    r"\binejpxk.default-release"
+    r"\YMCBoBDv.Profile 3"
 )
 # Throwaway profile Playwright owns entirely — recreated fresh every run
 PLAYWRIGHT_PROFILE_DIR = r"C:\Users\sandeep\AppData\Local\linkedin_scraper_profile"
+PLAYWRIGHT_CHROMIUM_PROFILE_DIR = (
+    r"C:\Users\sandeep\AppData\Local\linkedin_scraper_chromium_profile"
+)
 
 # ---------------------------------------------------------------------------
 # SCRAPING BEHAVIOUR  —  tune these to balance speed vs. block risk
@@ -183,7 +191,7 @@ DELAY_BETWEEN_EMPLOYEE_CARDS = (0.45, 1.35)
 MAX_COMBOS_PER_RUN  = 30
 
 # How many NEW companies to collect before stopping for this run.
-MAX_COMPANIES_PER_RUN = 100    # ← raise for production (e.g. 50 or 200)
+MAX_COMPANIES_PER_RUN = 20     # ← raise for production (e.g. 50 or 100)
 
 # How many LinkedIn result pages to fetch per combination (10 results/page).
 # 10 pages = up to 100 companies per combination.
@@ -499,7 +507,25 @@ CREATE TABLE IF NOT EXISTS employees (
     updated_timestamp    TEXT
 );
 
+-- ── SCRAPER RUN HISTORY ────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS scraper_runs (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at              TEXT    NOT NULL,
+    finished_at             TEXT    NOT NULL,
+    duration_seconds        REAL    NOT NULL,
+    duration_display        TEXT    NOT NULL,
+    test_mode               INTEGER NOT NULL DEFAULT 0,
+    production_run          INTEGER NOT NULL DEFAULT 0,
+    browser                 TEXT    DEFAULT '',
+    companies_saved         INTEGER NOT NULL DEFAULT 0,
+    employees_saved         INTEGER NOT NULL DEFAULT 0,
+    countries_covered       TEXT    DEFAULT '',
+    avg_seconds_per_company REAL,
+    notes                   TEXT    DEFAULT ''
+);
+
 -- ── INDEXES ───────────────────────────────────────────────────────────────
+CREATE INDEX IF NOT EXISTS idx_scraper_runs_started ON scraper_runs(started_at);
 CREATE INDEX IF NOT EXISTS idx_companies_url   ON companies(linkedin_url);
 CREATE INDEX IF NOT EXISTS idx_employees_url   ON employees(profile_url);
 CREATE INDEX IF NOT EXISTS idx_employees_co    ON employees(company_linkedin_url);
@@ -846,6 +872,38 @@ def get_scraped_urls(conn: sqlite3.Connection) -> set[str]:
     return {r[0] for r in rows}
 
 
+def get_companies_with_zero_employees(
+    conn: sqlite3.Connection, limit: int
+) -> list[tuple[str, str]]:
+    """
+    Companies already in DB but with no employee rows — for backfill when the
+    account could not see /people/ on the first pass (e.g. fresh LinkedIn profile).
+    Returns list of (linkedin_url, country_name).
+    """
+    if limit <= 0:
+        return []
+    cur = conn.execute(
+        """
+        SELECT c.linkedin_url, COALESCE(c.country, '')
+        FROM companies c
+        WHERE c.linkedin_url IS NOT NULL AND trim(c.linkedin_url) != ''
+          AND (
+            SELECT COUNT(*)
+            FROM employees e
+            WHERE e.company_name = c.company_name
+               OR (
+                    trim(COALESCE(c.linkedin_url, '')) != ''
+                    AND e.company_linkedin_url = c.linkedin_url
+                  )
+          ) = 0
+        ORDER BY c.updated_timestamp ASC, c.company_name
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    return [(r[0], r[1]) for r in cur.fetchall()]
+
+
 # ===========================================================================
 # CSV EXPORT  —  all 6 tables
 # ===========================================================================
@@ -1014,31 +1072,299 @@ async def intercept_api_responses(page: Page) -> None:
 # BROWSER / SESSION
 # ===========================================================================
 
-def _prepare_cookie_only_profile() -> str:
+# Avoid D3D11 / GPU-process hangs on Windows (common with Playwright Firefox).
+_FIREFOX_GPU_SAFE_PREFS: dict[str, object] = {
+    "layers.acceleration.disabled": True,
+    "layers.gpu-process.enabled": False,
+    "gfx.webrender.all": False,
+    "gfx.webrender.enabled": False,
+    "gfx.webrender.software": True,
+    "gfx.webrender.software.draw": True,
+    "media.hardware-video-decoding.enabled": False,
+    "media.ffmpeg.vaapi.enabled": False,
+}
+
+
+def _firefox_launch_prefs() -> dict[str, object]:
+    return {
+        "general.useragent.override": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:146.0) "
+            "Gecko/20100101 Firefox/146.0"
+        ),
+        "browser.startup.homepage_override.mstone": "ignore",
+        "startup.homepage_welcome_url": "",
+        "startup.homepage_welcome_url.additional": "",
+        "privacy.resistFingerprinting": False,
+        "dom.webdriver.enabled": False,
+        "dom.min_background_timeout_value": 4,
+        "dom.timeout.enable_budget_timer_throttling": False,
+        "dom.min_background_timeout_value_without_budget_throttling": 4,
+        "dom.timer.throttling.enabled": False,
+        "widget.windows.window_occlusion_tracking.enabled": False,
+        "browser.tabs.unloadOnLowMemory": False,
+        "browser.window.left": 0,
+        "browser.window.top": 0,
+        "browser.window.width": 1280,
+        "browser.window.height": 900,
+        "browser.sessionstore.resume_from_crash": False,
+        "browser.startup.page": 0,
+        "browser.startup.homepage": "about:blank",
+        **_FIREFOX_GPU_SAFE_PREFS,
+    }
+
+
+def _prepare_cookie_only_profile(firefox_profile_dir: str | None = None) -> str:
     """
     Copy ONLY cookies.sqlite from the real Firefox profile into a fresh
     throwaway directory. Avoids the 'older Firefox version' warning because
     the throwaway profile has no version stamp.
     """
-    src  = Path(FIREFOX_PROFILE_DIR)
+    src  = Path(firefox_profile_dir or FIREFOX_PROFILE_DIR)
     dest = Path(PLAYWRIGHT_PROFILE_DIR)
     src_cookies = src / "cookies.sqlite"
+    profile_label = str(src)
 
     if not src.exists():
         raise FileNotFoundError(
-            f"Firefox profile not found:\n  {FIREFOX_PROFILE_DIR}"
+            f"Firefox profile not found:\n  {profile_label}"
         )
     if not src_cookies.exists():
         raise FileNotFoundError(
-            f"cookies.sqlite missing from {FIREFOX_PROFILE_DIR}\n"
-            "Log into LinkedIn in your real Firefox first."
+            f"cookies.sqlite missing from {profile_label}\n"
+            "Log into LinkedIn in that Firefox profile first."
         )
+    dest_cookie = dest / "cookies.sqlite"
+    if (
+        dest_cookie.exists()
+        and src_cookies.exists()
+        and src_cookies.stat().st_mtime <= dest_cookie.stat().st_mtime
+    ):
+        logger.info("Reusing Playwright profile (cookies unchanged): %s", dest)
+        return str(dest)
+
     if dest.exists():
         shutil.rmtree(dest)
     dest.mkdir(parents=True)
-    shutil.copy2(src_cookies, dest / "cookies.sqlite")
-    logger.info("Cookies copied → %s", dest)
+    shutil.copy2(src_cookies, dest_cookie)
+    logger.info("Cookies copied from %s → %s", src, dest)
     return str(dest)
+
+
+def _linkedin_cookies_from_firefox_sqlite(cookies_path: Path) -> list[dict]:
+    """Read linkedin.com cookies from Firefox cookies.sqlite for Chromium import."""
+    if not cookies_path.exists():
+        return []
+    copy_path = cookies_path.with_name(".cookies_import_copy.sqlite")
+    try:
+        shutil.copy2(cookies_path, copy_path)
+        db_path = copy_path
+    except OSError:
+        db_path = cookies_path
+    same_site_map = {0: "None", 1: "Lax", 2: "Strict"}
+    out: list[dict] = []
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            cols = {
+                r[1]
+                for r in conn.execute("PRAGMA table_info(moz_cookies)").fetchall()
+            }
+            has_same_site = "sameSite" in cols
+            query = (
+                "SELECT name, value, host, path, expiry, isSecure, isHttpOnly"
+                + (", sameSite" if has_same_site else "")
+                + " FROM moz_cookies WHERE host LIKE '%linkedin%'"
+            )
+            for row in conn.execute(query).fetchall():
+                name, value, host, path, expiry, is_secure, is_http_only = row[:7]
+                same_site = row[7] if has_same_site and len(row) > 7 else 1
+                cookie: dict = {
+                    "name": name,
+                    "value": value,
+                    "domain": host,
+                    "path": path or "/",
+                    "httpOnly": bool(is_http_only),
+                    "secure": bool(is_secure),
+                    "sameSite": same_site_map.get(int(same_site), "Lax"),
+                }
+                exp = int(expiry or 0)
+                cookie["expires"] = float(exp) if exp > 0 else -1
+                out.append(cookie)
+        finally:
+            conn.close()
+    finally:
+        if copy_path.exists() and copy_path != cookies_path:
+            copy_path.unlink(missing_ok=True)
+    return out
+
+
+def _session_file_path() -> Path:
+    """Prefer data/json/linkedin_state.json; fall back to legacy file in project root."""
+    path = Path(SESSION_FILE)
+    legacy = Path(__file__).parent / "linkedin_state.json"
+    if not path.exists() and legacy.exists():
+        return legacy
+    return path
+
+
+def _sanitize_playwright_cookies(
+    cookies: list[dict],
+    *,
+    linkedin_only: bool = False,
+) -> list[dict]:
+    """
+    Playwright accepts expires=-1 (session) or a positive Unix time in seconds.
+    Storage export and Firefox sometimes use 0, floats, or milliseconds.
+    """
+    allowed_same_site = {"Strict", "Lax", "None"}
+    out: list[dict] = []
+    for raw in cookies:
+        domain = (raw.get("domain") or "").lower()
+        if linkedin_only and domain and "linkedin" not in domain:
+            continue
+        name = raw.get("name")
+        if not name:
+            continue
+        value = raw.get("value")
+        if value is None:
+            continue
+        if not domain and not raw.get("url"):
+            continue
+
+        cookie: dict = {
+            "name": name,
+            "value": value,
+            "path": raw.get("path") or "/",
+        }
+        if raw.get("domain"):
+            cookie["domain"] = raw["domain"]
+        if raw.get("url"):
+            cookie["url"] = raw["url"]
+        if raw.get("httpOnly"):
+            cookie["httpOnly"] = True
+        if raw.get("secure"):
+            cookie["secure"] = True
+        ss = raw.get("sameSite")
+        cookie["sameSite"] = ss if ss in allowed_same_site else "Lax"
+
+        exp = raw.get("expires")
+        if exp is None or exp == "":
+            cookie["expires"] = -1
+        elif isinstance(exp, (int, float)):
+            if exp == -1:
+                cookie["expires"] = -1
+            elif exp > 0:
+                cookie["expires"] = float(exp / 1000 if exp > 1e12 else exp)
+            else:
+                cookie["expires"] = -1
+        else:
+            cookie["expires"] = -1
+        out.append(cookie)
+    return out
+
+
+async def _seed_linkedin_cookies(
+    context: BrowserContext,
+    firefox_profile_dir: str | None,
+    *,
+    cookies_applied: bool = False,
+) -> None:
+    if not cookies_applied and _session_state_fresh():
+        cookies_applied = await _apply_storage_state_cookies(context)
+    if cookies_applied:
+        return
+    src = Path(firefox_profile_dir or FIREFOX_PROFILE_DIR) / "cookies.sqlite"
+    cookies = _sanitize_playwright_cookies(
+        _linkedin_cookies_from_firefox_sqlite(src),
+        linkedin_only=True,
+    )
+    if cookies:
+        try:
+            await context.add_cookies(cookies)
+            logger.info("Imported %d LinkedIn cookie(s) from Firefox profile.", len(cookies))
+        except PlaywrightError as e:
+            logger.warning("Could not import Firefox cookies: %s", e)
+
+
+def _session_state_fresh(max_age_hours: float = 168.0) -> bool:
+    path = _session_file_path()
+    if not path.exists():
+        return False
+    age_h = (time.time() - path.stat().st_mtime) / 3600
+    return age_h <= max_age_hours
+
+
+async def _apply_storage_state_cookies(context: BrowserContext) -> bool:
+    path = _session_file_path()
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        raw = data.get("cookies") or []
+        cookies = _sanitize_playwright_cookies(raw, linkedin_only=True)
+        if not cookies:
+            return False
+        await context.add_cookies(cookies)
+        logger.info(
+            "Applied %d LinkedIn cookie(s) from saved session (%s).",
+            len(cookies),
+            path.name,
+        )
+        return True
+    except PlaywrightError as e:
+        logger.warning("Saved session cookies rejected by browser (%s): %s", path, e)
+        return False
+    except Exception as e:
+        logger.warning("Could not load cookies from %s: %s", path, e)
+        return False
+
+
+async def _open_linkedin_feed(page: Page, *, browser_label: str) -> bool:
+    """Navigate to the feed and return True if the tab reached linkedin.com."""
+    for attempt in (1, 2):
+        try:
+            await page.goto(
+                "https://www.linkedin.com/feed/",
+                wait_until="commit" if attempt == 1 else "domcontentloaded",
+                timeout=60_000,
+            )
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=25_000)
+            except PlaywrightError:
+                pass
+        except PlaywrightError as e:
+            logger.warning(
+                "%s: feed navigation attempt %d failed: %s",
+                browser_label,
+                attempt,
+                e,
+            )
+            continue
+        if "linkedin.com" in page.url.lower():
+            return True
+        logger.warning(
+            "%s: tab did not reach LinkedIn after attempt %d (url=%r).",
+            browser_label,
+            attempt,
+            page.url,
+        )
+    return False
+
+
+async def _verify_linkedin_logged_in(context: BrowserContext) -> bool:
+    """Lightweight auth check — avoids loading the heavy /feed/ page."""
+    try:
+        resp = await context.request.get(
+            "https://www.linkedin.com/voyager/api/me",
+            timeout=20_000,
+        )
+        if resp.status != 200:
+            return False
+        snippet = (await resp.text())[:800].lower()
+        return not any(x in snippet for x in ("signup", "authwall", "guest"))
+    except Exception as e:
+        logger.debug("Voyager session check failed: %s", e)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -1079,69 +1405,206 @@ _JS_KEEPALIVE = """
 """
 
 
-async def load_or_create_session(playwright: Playwright) -> BrowserContext:
-    profile_dir = _prepare_cookie_only_profile()
-    context = await playwright.firefox.launch_persistent_context(
-        user_data_dir=profile_dir,
+async def _launch_firefox_context(
+    playwright: Playwright,
+    firefox_profile_dir: str | None,
+    *,
+    fast_warmup: bool,
+    max_attempts: int = 2,
+) -> BrowserContext:
+    os.environ.setdefault("MOZ_DISABLE_GPU", "1")
+    os.environ.setdefault("MOZ_WEBRENDER", "0")
+    os.environ.setdefault("MOZ_SOFTWARE_RENDERING", "1")
+
+    profile_dir = _prepare_cookie_only_profile(firefox_profile_dir)
+    logger.info(
+        "Launching Playwright Firefox%s…",
+        " [quick warmup]" if fast_warmup else "",
+    )
+    launch_start = time.perf_counter()
+    context: BrowserContext | None = None
+    last_err: PlaywrightError | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            context = await playwright.firefox.launch_persistent_context(
+                user_data_dir=profile_dir,
+                headless=False,
+                viewport={"width": 1280, "height": 900},
+                locale="en-US",
+                firefox_user_prefs=_firefox_launch_prefs(),
+                ignore_default_args=["-wait-for-browser"],
+                timeout=90_000,
+            )
+            break
+        except PlaywrightError as e:
+            last_err = e
+            logger.error("Firefox launch failed (attempt %d/2): %s", attempt, e)
+            if attempt >= max_attempts:
+                raise
+            logger.info("Wiping Playwright profile and retrying Firefox once…")
+            shutil.rmtree(profile_dir, ignore_errors=True)
+            profile_dir = _prepare_cookie_only_profile(firefox_profile_dir)
+    if context is None:
+        raise last_err or RuntimeError("Firefox launch failed with no context")
+    logger.info(
+        "Firefox window up in %.1fs (starts on a blank page; LinkedIn loads next).",
+        time.perf_counter() - launch_start,
+    )
+    return context
+
+
+async def _launch_chromium_context(playwright: Playwright) -> BrowserContext:
+    dest = Path(PLAYWRIGHT_CHROMIUM_PROFILE_DIR)
+    dest.mkdir(parents=True, exist_ok=True)
+    logger.info("Launching Chromium (Firefox GPU/D3D11 unavailable on this PC)…")
+    launch_start = time.perf_counter()
+    context = await playwright.chromium.launch_persistent_context(
+        str(dest),
         headless=False,
         viewport={"width": 1280, "height": 900},
         locale="en-US",
-        firefox_user_prefs={
-            # Match the actual Firefox version being used (146)
-            "general.useragent.override": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:146.0) "
-                "Gecko/20100101 Firefox/146.0"
-            ),
-            "browser.startup.homepage_override.mstone": "ignore",
-            "startup.homepage_welcome_url": "",
-            "startup.homepage_welcome_url.additional": "",
-            # Reduce automation fingerprinting
-            "privacy.resistFingerprinting": False,
-            "dom.webdriver.enabled": False,
-            # ── Fix: dummy HDMI adapter removed → Firefox window goes off-screen
-            # Firefox marks off-screen pages as "hidden" (Page Visibility API)
-            # and throttles ALL timers to ≥1000 ms, causing 60-minute pauses.
-            # These prefs force Firefox to treat every page as foreground.
-            "dom.min_background_timeout_value": 4,
-            "dom.timeout.enable_budget_timer_throttling": False,
-            "dom.min_background_timeout_value_without_budget_throttling": 4,
-            "dom.timer.throttling.enabled": False,
-            # Prevent Firefox from throttling/suspending when window is minimized or covered/occluded
-            "widget.windows.window_occlusion_tracking.enabled": False,
-            "browser.tabs.unloadOnLowMemory": False,
-            # Force window onto primary monitor (0,0) so it is never off-screen
-            "browser.window.left": 0,
-            "browser.window.top": 0,
-            "browser.window.width": 1280,
-            "browser.window.height": 900,
-            "browser.sessionstore.resume_from_crash": False,
-        },
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        ),
+        timeout=60_000,
     )
-    # Inject keepalive into EVERY page that opens in this context
-    await context.add_init_script(_JS_KEEPALIVE)
-    logger.info("JS keepalive injected into browser context.")
-    page = await context.new_page()
-    await page.bring_to_front()   # ensure window is foregrounded, not treated as hidden
-    await page.goto(
-        "https://www.linkedin.com/feed/",
-        wait_until="load",
-        timeout=30_000,
-    )
-    await wait_page_settled(page)
-    await sleep_rand(*DELAY_SHORT)
-    await maybe_mouse_drift(page)
-    await human_scroll(page, steps=random.randint(2, 4))
-    await wait_page_settled(page)
+    logger.info("Chromium window up in %.1fs.", time.perf_counter() - launch_start)
+    return context
 
-    if "login" in page.url or "authwall" in page.url or "challenge" in page.url:
-        logger.warning("Cookies expired or Captcha hit — please log in manually. Pausing for 3 minutes...")
-        await sleep_rand(180, 180, label="manual-login-wait")   # chunked so OS timer throttle can't freeze it
+
+async def _warm_up_linkedin_session(
+    context: BrowserContext,
+    *,
+    force_login: bool,
+    fast_warmup: bool,
+    firefox_profile_dir: str | None,
+    browser_label: str,
+) -> BrowserContext:
+    await context.add_init_script(_JS_KEEPALIVE)
+    cookies_applied = False
+    if _session_state_fresh():
+        cookies_applied = await _apply_storage_state_cookies(context)
+    if browser_label == "chromium":
+        await _seed_linkedin_cookies(
+            context, firefox_profile_dir, cookies_applied=cookies_applied
+        )
+
+    # Reuse the default tab (about:blank) — avoids an extra empty tab sitting on top.
+    if context.pages:
+        page = context.pages[0]
+        for extra in context.pages[1:]:
+            await extra.close()
+    else:
+        page = await context.new_page()
+    await page.bring_to_front()
+
+    if force_login:
+        logger.info("Force login requested. Logging out of current session...")
+        try:
+            await page.goto(
+                "https://www.linkedin.com/m/logout",
+                wait_until="load",
+                timeout=30_000,
+            )
+            await sleep_rand(4.0, 6.0, label="logout-wait")
+        except Exception as e:
+            logger.warning("Error during logout navigation: %s", e)
+        
+        # Navigate directly to the login page to prompt sign-in
+        await page.goto(
+            "https://www.linkedin.com/login",
+            wait_until="load",
+            timeout=30_000,
+        )
+    elif fast_warmup:
+        logger.info("Checking LinkedIn session (API)…")
+        if await _verify_linkedin_logged_in(context):
+            logger.info("LinkedIn session active (API) — opening feed in browser…")
+        else:
+            logger.info("API check inconclusive — opening feed to verify session…")
+        if not await _open_linkedin_feed(page, browser_label=browser_label):
+            logger.error(
+                "%s could not load LinkedIn in the browser window. "
+                "On this PC Playwright Firefox often fails D3D11/GPU; "
+                "use: python linkedin_scraper.py --browser chromium",
+                browser_label.capitalize(),
+            )
+        await sleep_rand(1.0, 2.0, label="session-check")
+    else:
+        logger.info("Opening LinkedIn feed to verify session…")
+        if not await _open_linkedin_feed(page, browser_label=browser_label):
+            logger.error(
+                "%s could not load LinkedIn. Try --browser chromium.",
+                browser_label.capitalize(),
+            )
+
+    if fast_warmup:
+        pass  # already handled above (API path or short feed fallback)
+    else:
+        await wait_page_settled(page)
+        await sleep_rand(*DELAY_SHORT)
+        await maybe_mouse_drift(page)
+        await human_scroll(page, steps=random.randint(2, 4))
+        await wait_page_settled(page)
+
+    if "login" in page.url or "authwall" in page.url or "challenge" in page.url or force_login:
+        wait_secs = 120 if fast_warmup else 300
+        logger.warning(
+            "Cookies expired, Captcha hit, or Force Login requested — "
+            "please log in manually in the browser window. Pausing %ds…",
+            wait_secs,
+        )
+        await sleep_rand(wait_secs, wait_secs, label="manual-login-wait")
         await context.storage_state(path=SESSION_FILE)
     else:
         logger.info("LinkedIn session active — no login needed.")
 
-    await page.close()
+    # Keep the LinkedIn tab open (scraping opens its own pages as needed).
     return context
+
+
+async def load_or_create_session(
+    playwright: Playwright,
+    force_login: bool = False,
+    firefox_profile_dir: str | None = None,
+    *,
+    fast_warmup: bool = False,
+    browser: str = "auto",
+) -> BrowserContext:
+    browser = (browser or "auto").lower()
+    context: BrowserContext | None = None
+    browser_label = "firefox"
+
+    if browser in ("auto", "firefox"):
+        try:
+            context = await _launch_firefox_context(
+                playwright,
+                firefox_profile_dir,
+                fast_warmup=fast_warmup,
+                max_attempts=1 if browser == "auto" else 2,
+            )
+        except PlaywrightError as e:
+            if browser == "firefox":
+                raise
+            logger.warning(
+                "Firefox could not start (GPU/D3D11). Falling back to Chromium. %s",
+                e,
+            )
+
+    if context is None:
+        if browser == "firefox":
+            raise RuntimeError("Firefox launch failed")
+        context = await _launch_chromium_context(playwright)
+        browser_label = "chromium"
+
+    return await _warm_up_linkedin_session(
+        context,
+        force_login=force_login,
+        fast_warmup=fast_warmup,
+        firefox_profile_dir=firefox_profile_dir,
+        browser_label=browser_label,
+    )
 
 
 # ===========================================================================
@@ -1845,6 +2308,67 @@ def save_employees(conn: sqlite3.Connection, employees: list[dict]) -> None:
 # MAIN
 # ===========================================================================
 
+def save_scraper_run(
+    *,
+    started_at: datetime,
+    finished_at: datetime,
+    elapsed_seconds: float,
+    test_mode: bool,
+    production_run: bool,
+    browser: str,
+    companies_saved: int,
+    employees_saved: int,
+    countries_covered: set[str],
+    avg_seconds_per_company: float,
+    notes: str = "",
+) -> int | None:
+    """Persist one scraper execution to scraper_runs."""
+    duration_display = _format_run_duration(elapsed_seconds)
+    countries_str = ", ".join(sorted(countries_covered)) if countries_covered else ""
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            """
+            INSERT INTO scraper_runs (
+                started_at, finished_at, duration_seconds, duration_display,
+                test_mode, production_run, browser,
+                companies_saved, employees_saved, countries_covered,
+                avg_seconds_per_company, notes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                started_at.strftime("%Y-%m-%d %H:%M:%S"),
+                finished_at.strftime("%Y-%m-%d %H:%M:%S"),
+                round(elapsed_seconds, 2),
+                duration_display,
+                int(test_mode),
+                int(production_run),
+                browser or "",
+                companies_saved,
+                employees_saved,
+                countries_str,
+                round(avg_seconds_per_company, 2) if avg_seconds_per_company else None,
+                notes,
+            ),
+        )
+        conn.commit()
+        run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        logger.info(
+            "Run logged to scraper_runs (id=%s, duration=%s).",
+            run_id,
+            duration_display,
+        )
+        return int(run_id)
+    except Exception as e:
+        logger.warning("Could not save scraper run to database: %s", e)
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def _format_run_duration(seconds: float) -> str:
     """Human-readable duration for run summary logs."""
     if seconds < 60:
@@ -1856,9 +2380,206 @@ def _format_run_duration(seconds: float) -> str:
     return f"{h}h {m}m {s}s"
 
 
+# Human-readable labels for v_validation_pipeline_summary columns (key = view column name).
+_PIPELINE_SUMMARY_LABELS: dict[str, str] = {
+    "total_employee_rows": "All employee rows in database",
+    "scrapeable_employees": (
+        "Outreach-ready (domain + name) — includes already-contacted employees"
+    ),
+    "rows_in_employee_email_state": "Employees tracked in email-validation state table",
+    "never_in_validation_cycle": "Outreach-ready employees never started in validation cycle",
+    "resolved_valid_count": "Employees with at least one confirmed valid email address",
+    "still_eligible_for_validation": "Still eligible for another validation / format attempt",
+    "eligible_firstname_lastname": "Next format to try: firstname.lastname@domain",
+    "eligible_firstname": "Next format to try: firstname@domain",
+    "eligible_firstinitial_lastname": "Next format to try: f.lastname@domain (first initial)",
+    "eligible_firstname_lastinitial": "Next format to try: firstname.l@domain (last initial)",
+    "cascade_exhausted_no_valid": "All format patterns tried — no valid address found",
+    "allowlisted_addresses": "Allowlisted addresses (trusted / skip re-validation)",
+    "pool_sendable_addresses": "Addresses in send pool (ready for campaign)",
+    "email_attempts_total": "Total email_attempts rows (every send + bounce record)",
+    "email_attempts_sent": "Attempts with status sent (SMTP accepted)",
+    "email_attempts_bounced": "Attempts with status bounced / delivery failed",
+}
+
+
+def _pipeline_summary_label(column_name: str) -> str:
+    return _PIPELINE_SUMMARY_LABELS.get(column_name, column_name.replace("_", " "))
+
+
+def _db_has_view(conn: sqlite3.Connection, view_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='view' AND name=?",
+        (view_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _normalize_domain_sql(expr: str) -> str:
+    """SQL expression: strip scheme/www from a domain column."""
+    return f"""
+        lower(
+            trim(
+                replace(
+                    replace(
+                        replace(
+                            CASE
+                                WHEN instr({expr}, '/') > 0
+                                THEN substr({expr}, 1, instr({expr}, '/') - 1)
+                                ELSE {expr}
+                            END,
+                            'https://', ''
+                        ),
+                        'http://', ''
+                    ),
+                    'www.', ''
+                )
+            )
+        )
+    """
+
+
+def _employee_email_outreach_stats(conn: sqlite3.Connection) -> dict[str, int]:
+    """
+    Per-employee outreach counts (same scrapeable pool as validation_pipeline_views).
+
+    - reachable_not_sent_successfully: outreach-ready, formats NOT all exhausted,
+      and no email_attempts row with status 'sent' for that employee
+    - never_emailed_once: subset with zero attempts
+    - all_attempts_failed: subset with attempts but zero sent (bounces only, etc.)
+    """
+    empty = {
+        "reachable_not_sent_successfully": 0,
+        "never_emailed_once": 0,
+        "all_attempts_failed": 0,
+    }
+    try:
+        conn.execute("SELECT 1 FROM email_attempts LIMIT 1")
+    except sqlite3.OperationalError:
+        return empty
+
+    dom_ea = _normalize_domain_sql("ea.company_domain")
+
+    if _db_has_view(conn, "v_scrapeable_employees"):
+        dom_s = "lower(trim(s.company_domain))"
+        base_from = """
+            FROM v_scrapeable_employees s
+            LEFT JOIN v_employee_validation_status v
+                ON v.employee_key = s.employee_key
+        """
+        exhausted_expr = "COALESCE(v.cascade_exhausted_no_valid, 0)"
+    else:
+        dom_s = _normalize_domain_sql("c.company_domain")
+        base_from = """
+            FROM employees e
+            JOIN companies c ON (
+                e.company_name = c.company_name
+                OR (
+                    COALESCE(trim(e.company_linkedin_url), '') != ''
+                    AND e.company_linkedin_url = c.linkedin_url
+                )
+            )
+            LEFT JOIN employee_email_state st
+                ON st.employee_key = lower(trim(c.company_name)) || '|' || lower(trim(e.employee_name))
+        """
+        exhausted_expr = """
+            CASE
+                WHEN trim(coalesce(st.resolved_valid_email, '')) != '' THEN 0
+                WHEN trim(coalesce(st.format_firstname_lastname_status, '')) != ''
+                 AND trim(coalesce(st.format_firstname_status, '')) != ''
+                 AND trim(coalesce(st.format_firstinitial_lastname_status, '')) != ''
+                 AND trim(coalesce(st.format_firstname_lastinitial_status, '')) != ''
+                 AND lower(trim(st.format_firstname_lastname_status)) NOT IN ('ok', 'valid', 'deliverable')
+                 AND lower(trim(st.format_firstname_status)) NOT IN ('ok', 'valid', 'deliverable')
+                 AND lower(trim(st.format_firstinitial_lastname_status)) NOT IN ('ok', 'valid', 'deliverable')
+                 AND lower(trim(st.format_firstname_lastinitial_status)) NOT IN ('ok', 'valid', 'deliverable')
+                THEN 1
+                ELSE 0
+            END
+        """
+
+    if _db_has_view(conn, "v_scrapeable_employees"):
+        base_select = f"""
+            SELECT DISTINCT
+                s.employee_id AS employee_id,
+                trim(s.employee_name) AS employee_name,
+                {dom_s} AS company_domain,
+                {exhausted_expr} AS cascade_exhausted_no_valid
+            {base_from}
+        """
+    else:
+        base_select = f"""
+            SELECT DISTINCT
+                e.id AS employee_id,
+                trim(e.employee_name) AS employee_name,
+                {dom_s} AS company_domain,
+                {exhausted_expr} AS cascade_exhausted_no_valid
+            {base_from}
+            WHERE c.company_domain IS NOT NULL
+              AND trim(c.company_domain) != ''
+              AND e.employee_name IS NOT NULL
+              AND length(trim(e.employee_name)) > 3
+              AND instr(trim(e.employee_name), ' ') > 0
+              AND e.employee_name NOT LIKE '%·%'
+              AND e.employee_name NOT LIKE '% 2nd%'
+              AND e.employee_name NOT LIKE '% 3rd%'
+        """
+
+    row = conn.execute(
+        f"""
+        WITH base AS (
+            {base_select}
+        ),
+        per_employee AS (
+            SELECT
+                b.employee_id,
+                b.cascade_exhausted_no_valid,
+                COUNT(ea.id) AS attempt_count,
+                SUM(
+                    CASE WHEN lower(COALESCE(ea.status, '')) = 'sent' THEN 1 ELSE 0 END
+                ) AS sent_count
+            FROM base b
+            LEFT JOIN email_attempts ea ON (
+                {dom_ea} = b.company_domain
+                AND trim(ea.employee_name) = b.employee_name
+            )
+            GROUP BY b.employee_id, b.cascade_exhausted_no_valid
+        )
+        SELECT
+            SUM(
+                CASE
+                    WHEN cascade_exhausted_no_valid = 0 AND sent_count = 0 THEN 1
+                    ELSE 0
+                END
+            ),
+            SUM(
+                CASE
+                    WHEN cascade_exhausted_no_valid = 0 AND attempt_count = 0 THEN 1
+                    ELSE 0
+                END
+            ),
+            SUM(
+                CASE
+                    WHEN cascade_exhausted_no_valid = 0
+                     AND attempt_count > 0
+                     AND sent_count = 0 THEN 1
+                    ELSE 0
+                END
+            )
+        FROM per_employee
+        """
+    ).fetchone()
+    if not row:
+        return empty
+    return {
+        "reachable_not_sent_successfully": int(row[0] or 0),
+        "never_emailed_once": int(row[1] or 0),
+        "all_attempts_failed": int(row[2] or 0),
+    }
+
+
 def print_db_summary_to_logger() -> None:
     try:
-        import sqlite3
         import os
         if not os.path.exists(DB_FILE):
             return
@@ -1868,13 +2589,42 @@ def print_db_summary_to_logger() -> None:
             conn.close()
             return
         names = [d[0] for d in conn.execute("SELECT * FROM v_validation_pipeline_summary").description]
+        outreach = _employee_email_outreach_stats(conn)
         logger.info("")
-        logger.info("=" * 60)
-        logger.info("  DATABASE PIPELINE SUMMARY (v_validation_pipeline_summary)")
-        logger.info("=" * 60)
+        logger.info("=" * 72)
+        logger.info("  EMAIL / VALIDATION PIPELINE SUMMARY")
+        logger.info("=" * 72)
+        logger.info(
+            "  %-55s: %s",
+            ">>> STILL REACHABLE: no successful send, formats not all exhausted",
+            f"{outreach['reachable_not_sent_successfully']:,}",
+        )
+        logger.info(
+            "       (never emailed + bounce-only; excludes all formats exhausted)"
+        )
+        logger.info("")
+        logger.info("  (detail from view v_validation_pipeline_summary)")
+        logger.info("")
         for name, val in zip(names, row):
-            logger.info(f"  {name:<30}: {val:,}" if isinstance(val, int) else f"  {name:<30}: {val}")
-        logger.info("=" * 60)
+            label = _pipeline_summary_label(name)
+            if isinstance(val, int):
+                logger.info("  %-55s: %s", label, f"{val:,}")
+            else:
+                logger.info("  %-55s: %s", label, val)
+
+        logger.info("")
+        logger.info("  --- Per-employee outreach breakdown ---")
+        logger.info(
+            "  %-55s: %s",
+            "Never emailed — not even one attempt",
+            f"{outreach['never_emailed_once']:,}",
+        )
+        logger.info(
+            "  %-55s: %s",
+            "Emailed before but every attempt failed (0 sent, has bounce/attempt rows)",
+            f"{outreach['all_attempts_failed']:,}",
+        )
+        logger.info("=" * 72)
         conn.close()
     except Exception as e:
         logger.warning("Could not print database validation summary: %s", e)
@@ -1896,15 +2646,58 @@ def _count_emails_in_db(conn: sqlite3.Connection) -> int:
 
 
 def parse_cli_args() -> argparse.Namespace:
-    """--test is accepted in any casing (--Test, --TEST, etc.)."""
-    argv = [("--test" if a.lower() == "--test" else a) for a in sys.argv[1:]]
+    """--run enables production caps; default (no args) is test mode."""
+    argv = []
+    for a in sys.argv[1:]:
+        a_lower = a.lower()
+        if a_lower in ("--run", "--production", "--full"):
+            argv.append("--run")
+        elif a_lower in ("--login", "--switch"):
+            argv.append("--login")
+        else:
+            argv.append(a)
+
     parser = argparse.ArgumentParser(
         description="LinkedIn company/employee scraper (Playwright + SQLite).",
     )
     parser.add_argument(
-        "--test",
+        "--run",
         action="store_true",
-        help="Quick run: 1 search combo, 1 results page, 1 new company, 1 employee.",
+        help=(
+            "Production run: normal company/employee limits and search queue. "
+            "Also revisits companies already in DB that have zero employees. "
+            "Default without this flag: test mode (1 company, 1 employee)."
+        ),
+    )
+    parser.add_argument(
+        "--login",
+        action="store_true",
+        help="Force logout of the current session and show the login page to switch accounts.",
+    )
+    parser.add_argument(
+        "--firefox-profile",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Firefox profile folder to copy cookies from (must contain cookies.sqlite). "
+            "Default: FIREFOX_PROFILE_DIR in linkedin_scraper.py. "
+            "Create a dedicated profile in Firefox Profile Manager for a separate LinkedIn account."
+        ),
+    )
+    parser.add_argument(
+        "--browser",
+        choices=("auto", "firefox", "chromium"),
+        default="chromium",
+        help=(
+            "Browser window: chromium (default, reliable on Windows) or firefox. "
+            "auto tries Firefox once then Chromium. Cookies always come from your "
+            "Firefox 'scraper' profile / linkedin_state.json."
+        ),
+    )
+    parser.add_argument(
+        "--summary-only",
+        action="store_true",
+        help="Print email/validation pipeline summary from DB and exit (no browser).",
     )
     return parser.parse_args(argv)
 
@@ -1956,10 +2749,11 @@ async def mouse_mover_loop() -> None:
         logger.warning("Background mouse mover encountered error: %s", e)
 
 
-async def main() -> None:
+async def main(cli_args: argparse.Namespace | None = None) -> None:
+    cli_args = cli_args or parse_cli_args()
     logger.info("=== LinkedIn Scraper v4.2 ===")
     if TEST_MODE:
-        logger.info("  (running with --test limits)")
+        logger.info("  (test mode — default limits; use --run for production)")
 
     wall_start = datetime.now()
     perf_start = time.perf_counter()
@@ -1967,12 +2761,14 @@ async def main() -> None:
     
     companies_saved = 0
     employees_saved = 0
-    countries_covered = set()
-    company_processing_times = []
+    countries_covered: set[str] = set()
+    company_processing_times: list[float] = []
     emails_start = 0   # snapshot before run; delta = emails added this session
+    run_notes = ""
 
     # Start background mouse mover task to reset idle timer
     mouse_task = asyncio.create_task(mouse_mover_loop())
+    conn: sqlite3.Connection | None = None
 
     try:
         conn = init_db(DB_FILE)
@@ -1996,16 +2792,48 @@ async def main() -> None:
         build_combinations(conn)   # re-insert pending rows in correct sort order
         recover_stale_combinations(conn)
         if not verify_search_combinations_table(conn):
+            run_notes = "aborted: search_combinations table invalid"
             return
 
+        logger.info(
+            "Browser engine: %s (session cookies from Firefox profile / %s)",
+            cli_args.browser,
+            SESSION_FILE,
+        )
+        if cli_args.firefox_profile:
+            logger.info("Using Firefox cookie profile: %s", cli_args.firefox_profile)
         async with async_playwright() as pw:
-            context = await load_or_create_session(pw)
+            context = await load_or_create_session(
+                pw,
+                force_login=cli_args.login,
+                firefox_profile_dir=cli_args.firefox_profile,
+                fast_warmup=TEST_MODE,
+                browser=cli_args.browser,
+            )
             try:
                 # Returns list of (url, country_name)
                 discoveries = await discover_companies(context, conn)
 
+                if cli_args.run:
+                    seen_urls = {u for u, _ in discoveries}
+                    room = max(0, MAX_COMPANIES_PER_RUN - len(discoveries))
+                    backfill = get_companies_with_zero_employees(conn, room)
+                    added = 0
+                    for url, country in backfill:
+                        if url not in seen_urls:
+                            discoveries.append((url, country))
+                            seen_urls.add(url)
+                            added += 1
+                    if added:
+                        logger.info(
+                            "Backfill: queued %d companies already in DB with 0 employees "
+                            "(fresh account /people/ retry).",
+                            added,
+                        )
+
                 if not discoveries:
                     verify_search_combinations_table(conn)
+                    run_notes = "no new companies queued"
                     logger.warning(
                         "No new companies found this run.\n"
                         "The script tried up to %d combination(s) from "
@@ -2074,16 +2902,41 @@ async def main() -> None:
             pass
         wall_end = datetime.now()
         elapsed_s = time.perf_counter() - perf_start
+        duration_display = _format_run_duration(elapsed_s)
         avg_time_per_company = (sum(company_processing_times) / len(company_processing_times)) if company_processing_times else 0.0
-        
+
+        run_id = save_scraper_run(
+            started_at=wall_start,
+            finished_at=wall_end,
+            elapsed_seconds=elapsed_s,
+            test_mode=TEST_MODE,
+            production_run=bool(cli_args.run),
+            browser=cli_args.browser,
+            companies_saved=companies_saved,
+            employees_saved=employees_saved,
+            countries_covered=countries_covered,
+            avg_seconds_per_company=avg_time_per_company,
+            notes=run_notes,
+        )
+
+        print()
+        print("=" * 60)
+        print(f"  TOTAL EXECUTION TIME : {duration_display} ({elapsed_s:.1f} s)")
+        if run_id is not None:
+            print(f"  Saved to database    : scraper_runs id={run_id}")
+        print("=" * 60)
+        print()
+
         logger.info("=== RUN SUMMARY ===")
         logger.info("  Start time      : %s", wall_start.strftime(ts_fmt))
         logger.info("  End time        : %s", wall_end.strftime(ts_fmt))
         logger.info(
             "  Total duration  : %s (%.1f seconds)",
-            _format_run_duration(elapsed_s),
+            duration_display,
             elapsed_s,
         )
+        if run_id is not None:
+            logger.info("  Run id (DB)     : %d  (table: scraper_runs)", run_id)
         logger.info("  Companies saved : %d", companies_saved)
         logger.info("  Employees saved : %d", employees_saved)
         logger.info(
@@ -2114,7 +2967,25 @@ async def main() -> None:
 
 if __name__ == "__main__":
     _cli = parse_cli_args()
-    if _cli.test:
+    if _cli.summary_only:
+        print_db_summary_to_logger()
+        sys.exit(0)
+    if not _cli.run:
         apply_test_mode_limits()
+    else:
+        logger.info(
+            "PRODUCTION MODE (--run): max %d companies, %d employees/company, %d combos.",
+            MAX_COMPANIES_PER_RUN,
+            MAX_EMPLOYEES_PER_COMPANY,
+            MAX_COMBOS_PER_RUN,
+        )
     with prevent_windows_sleep():
-        asyncio.run(main())
+        try:
+            asyncio.run(main(_cli))
+        except PlaywrightError as e:
+            logger.error(
+                "Browser could not start. Close stuck firefox.exe / chrome.exe, "
+                "or run with: --browser chromium\n%s",
+                e,
+            )
+            sys.exit(1)
