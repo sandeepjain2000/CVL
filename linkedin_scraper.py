@@ -71,24 +71,39 @@ from pathlib import Path
 from typing import Generator
 from urllib.parse import urlparse, quote
 
+BEEPS_ENABLED = True
+
 # ---------------------------------------------------------------------------
 # AUDIO ALERTS  —  Windows beeps at key script events
 # ---------------------------------------------------------------------------
+def _beep(freq_hz: int, duration_ms: int) -> None:
+    """Play a Windows beep unless beeps are disabled by CLI."""
+    if not BEEPS_ENABLED:
+        return
+    winsound.Beep(freq_hz, duration_ms)
+
+
 def beep_ok() -> None:
     """Short high beep — company saved OK."""
-    winsound.Beep(1000, 200)   # 1000 Hz, 200 ms
+    _beep(1000, 200)   # 1000 Hz, 200 ms
 
 def beep_error() -> None:
     """Low double-beep — error on a company."""
-    winsound.Beep(400, 300)    # 400 Hz, 300 ms
-    winsound.Beep(300, 400)    # 300 Hz, 400 ms
+    _beep(400, 300)    # 400 Hz, 300 ms
+    _beep(300, 400)    # 300 Hz, 400 ms
+
+
+def beep_company_change() -> None:
+    """Brief transition beep when moving to next company."""
+    _beep(800, 120)
+    _beep(1000, 120)
 
 def beep_done() -> None:
     """Rising triple beep + long finish tone — entire run finished."""
-    winsound.Beep(600, 200)
-    winsound.Beep(900, 200)
-    winsound.Beep(1200, 400)
-    winsound.Beep(750, 2000)   # extra-long final beep (~2 s) — execution complete
+    _beep(600, 200)
+    _beep(900, 200)
+    _beep(1200, 400)
+    _beep(750, 2000)   # extra-long final beep (~2 s) — execution complete
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +150,7 @@ from playwright.async_api import (
 # ---------------------------------------------------------------------------
 LOG_DIR = Path(__file__).parent / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
-LOG_FILE = LOG_DIR / "linkedin_scraper.log"
+LOG_FILE = LOG_DIR / f"linkedin_scraper_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -146,6 +161,7 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger(__name__)
+logger.info("Log file: %s", LOG_FILE)
 
 # ---------------------------------------------------------------------------
 # FILE PATHS
@@ -201,6 +217,46 @@ MAX_PAGES_PER_COMBO   = 10
 MAX_EMPLOYEES_PER_COMPANY = 10
 
 TEST_MODE = False
+
+# ---------------------------------------------------------------------------
+# EMPLOYEE SEARCH FOCUS  —  reduce profile-history bias in /people/ results
+# ---------------------------------------------------------------------------
+EMPLOYEE_FOCUS_PRESETS: dict[str, list[str]] = {
+    # Neutral mode intentionally sends no keyword bias to LinkedIn.
+    "neutral": [],
+    # HR / talent-oriented mode.
+    "hr": [
+        "human resources",
+        "talent acquisition",
+        "recruiter",
+        "people operations",
+        "hr business partner",
+        "compensation",
+        "benefits",
+        "employee relations",
+        "learning and development",
+        "chief people officer",
+        "head of hr",
+    ],
+    # Top leadership and decision-maker mode.
+    "top-management": [
+        "chief executive officer",
+        "ceo",
+        "coo",
+        "cfo",
+        "cto",
+        "cio",
+        "cmo",
+        "president",
+        "vice president",
+        "director",
+        "head of",
+        "managing director",
+        "general manager",
+        "founder",
+        "partner",
+    ],
+}
 
 # ── LinkedIn geoUrn IDs for country-level location filtering ─────────────────
 GEO_URN_MAP: dict[str, str] = {
@@ -2243,7 +2299,78 @@ async def _scrape_employee_dom(page, company_url: str, company_name: str) -> lis
     return employees
 
 
-async def discover_employees(context, company: dict) -> list:
+def _parse_csv_terms(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+def _employee_focus_terms(mode: str, custom_keywords: list[str] | None = None) -> list[str]:
+    terms = list(EMPLOYEE_FOCUS_PRESETS.get(mode, []))
+    if custom_keywords:
+        terms.extend(custom_keywords)
+    # preserve order and remove duplicates
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for t in terms:
+        key = t.strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            deduped.append(t.strip())
+    return deduped
+
+
+def _build_people_url(
+    company_url: str,
+    *,
+    mode: str = "neutral",
+    custom_keywords: list[str] | None = None,
+) -> str:
+    base = company_url.rstrip("/") + "/people/"
+    terms = _employee_focus_terms(mode, custom_keywords)
+    if not terms:
+        return base
+    # LinkedIn "keywords" on /people is less personalized than default ranking.
+    keyword_query = " OR ".join(terms[:8])
+    return f"{base}?keywords={quote(keyword_query)}"
+
+
+def _employee_matches_focus(emp: dict, terms: list[str]) -> bool:
+    if not terms:
+        return True
+    hay = f"{emp.get('employee_name', '')} {emp.get('job_title', '')}".lower()
+    return any(t.lower() in hay for t in terms)
+
+
+def _apply_employee_focus(
+    employees: list[dict],
+    *,
+    mode: str = "neutral",
+    custom_keywords: list[str] | None = None,
+    strict: bool = False,
+) -> list[dict]:
+    terms = _employee_focus_terms(mode, custom_keywords)
+    if not terms:
+        return employees
+    matched = [e for e in employees if _employee_matches_focus(e, terms)]
+    if strict:
+        return matched
+    if not matched:
+        return employees
+    # non-strict: prioritize matching profiles while keeping fallback diversity
+    matched_urls = {e.get("profile_url", "") for e in matched}
+    remainder = [e for e in employees if e.get("profile_url", "") not in matched_urls]
+    return matched + remainder
+
+
+async def discover_employees(
+    context,
+    company: dict,
+    *,
+    focus_mode: str = "neutral",
+    custom_keywords: list[str] | None = None,
+    strict_focus: bool = False,
+) -> list:
     company_name = company.get("company_name", "Unknown")
     company_url  = company.get("linkedin_url", "")
     logger.info("We are now starting to scrape employees for this company.")
@@ -2253,9 +2380,20 @@ async def discover_employees(context, company: dict) -> list:
     page = await context.new_page()
     await intercept_api_responses(page)
 
+    people_url = _build_people_url(
+        company_url,
+        mode=focus_mode,
+        custom_keywords=custom_keywords,
+    )
+    logger.info("  Employee focus: %s", focus_mode)
+    if custom_keywords:
+        logger.info("  Custom employee keywords: %s", ", ".join(custom_keywords))
+    if strict_focus:
+        logger.info("  Strict focus filter: ON")
+
     for attempt in range(3):
         try:
-            await page.goto(company_url.rstrip("/") + "/people/",
+            await page.goto(people_url,
                             wait_until="domcontentloaded", timeout=40_000)
             await sleep_rand(*DELAY_MEDIUM)
             await maybe_mouse_drift(page)
@@ -2281,6 +2419,15 @@ async def discover_employees(context, company: dict) -> list:
     else:
         employees = await _scrape_employee_dom(page, company_url, company_name)
         logger.info("  %d employees via DOM.", len(employees))
+
+    employees = _apply_employee_focus(
+        employees,
+        mode=focus_mode,
+        custom_keywords=custom_keywords,
+        strict=strict_focus,
+    )
+    if focus_mode != "neutral" or custom_keywords:
+        logger.info("  %d employees after focus filter.", len(employees))
 
     await page.close()
     return employees[:MAX_EMPLOYEES_PER_COMPANY]
@@ -2699,6 +2846,37 @@ def parse_cli_args() -> argparse.Namespace:
         action="store_true",
         help="Print email/validation pipeline summary from DB and exit (no browser).",
     )
+    parser.add_argument(
+        "--employee-focus",
+        choices=("neutral", "hr", "top-management"),
+        default="neutral",
+        help=(
+            "Employee targeting mode on company /people pages. "
+            "neutral=unbiased broad scrape, hr=people/talent roles, "
+            "top-management=leadership/decision-makers."
+        ),
+    )
+    parser.add_argument(
+        "--employee-keywords",
+        default="",
+        help=(
+            "Optional extra employee keywords (comma-separated). "
+            "Example: --employee-keywords \"CHRO, Talent Director, HRBP\""
+        ),
+    )
+    parser.add_argument(
+        "--strict-employee-focus",
+        action="store_true",
+        help=(
+            "Keep only employees matching focus keywords. "
+            "Default keeps keyword matches first, then fallback profiles."
+        ),
+    )
+    parser.add_argument(
+        "--no-beep",
+        action="store_true",
+        help="Disable all beeps (success/error/company-change/done).",
+    )
     return parser.parse_args(argv)
 
 
@@ -2845,11 +3023,14 @@ async def main(cli_args: argparse.Namespace | None = None) -> None:
                     )
                     return
 
+                custom_employee_keywords = _parse_csv_terms(cli_args.employee_keywords)
+
                 for idx, (url, country_name) in enumerate(discoveries, 1):
                     print()
                     pct = (idx / len(discoveries)) * 100
                     if idx > 1:
                         logger.info("We are now moving from the previous company to the next one.")
+                        beep_company_change()
                     logger.info("─── %d / %d (%.1f%%) ───", idx, len(discoveries), pct)
                     company_start_time = time.perf_counter()
                     try:
@@ -2858,7 +3039,13 @@ async def main(cli_args: argparse.Namespace | None = None) -> None:
                         print()
                         employees = []
                         if company.get("website_raw"):
-                            employees = await discover_employees(context, company)
+                            employees = await discover_employees(
+                                context,
+                                company,
+                                focus_mode=cli_args.employee_focus,
+                                custom_keywords=custom_employee_keywords,
+                                strict_focus=cli_args.strict_employee_focus,
+                            )
                             save_employees(conn, employees)
                         else:
                             logger.info("  Skipping employee scraping - no website found.")
@@ -2967,6 +3154,16 @@ async def main(cli_args: argparse.Namespace | None = None) -> None:
 
 if __name__ == "__main__":
     _cli = parse_cli_args()
+    BEEPS_ENABLED = not _cli.no_beep
+    _custom_kw = _parse_csv_terms(_cli.employee_keywords)
+    logger.info(
+        "Employee focus mode: %s%s%s",
+        _cli.employee_focus,
+        " + custom keywords" if _custom_kw else "",
+        " (strict)" if _cli.strict_employee_focus else "",
+    )
+    if _custom_kw:
+        logger.info("Employee focus keywords: %s", ", ".join(_custom_kw))
     if _cli.summary_only:
         print_db_summary_to_logger()
         sys.exit(0)

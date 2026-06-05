@@ -67,6 +67,9 @@ echo.
 echo   [6] PRODUCTION + custom Firefox cookie profile path
 echo       (copies cookies.sqlite from your Firefox profile for Chromium)
 echo.
+echo   [7] PRODUCTION - Chromium - NO BEEP (silent mode)
+echo       Command: %PY% linkedin_scraper.py --run --browser chromium --no-beep
+echo.
 echo   [0] Back to main menu
 echo.
 set /p SCH="  Select option: "
@@ -76,6 +79,7 @@ if "%SCH%"=="3" goto SCRAPER_PROD_FIREFOX
 if "%SCH%"=="4" goto SCRAPER_PROD_AUTO
 if "%SCH%"=="5" goto SCRAPER_LOGIN
 if "%SCH%"=="6" goto SCRAPER_CUSTOM_PROFILE
+if "%SCH%"=="7" goto SCRAPER_PROD_CHROMIUM_SILENT
 if "%SCH%"=="0" goto MAIN
 goto MENU_SCRAPER
 
@@ -89,6 +93,12 @@ goto PAUSE_RETURN_MAIN
 echo.
 echo  Running PRODUCTION scrape - Chromium...
 %PY% linkedin_scraper.py --run --browser chromium
+goto PAUSE_RETURN_MAIN
+
+:SCRAPER_PROD_CHROMIUM_SILENT
+echo.
+echo  Running PRODUCTION scrape - Chromium - NO BEEP...
+%PY% linkedin_scraper.py --run --browser chromium --no-beep
 goto PAUSE_RETURN_MAIN
 
 :SCRAPER_PROD_FIREFOX
@@ -309,6 +319,7 @@ echo     --browser chromium^|firefox^|auto   default chromium on Windows
 echo     --login        Force re-login in browser window
 echo     --firefox-profile PATH   Cookie source for Chromium
 echo     --summary-only Print pipeline stats only (no browser)
+echo     --no-beep      Disable all beeps (including company-change beep)
 echo.
 echo   send_linkedin_campaigns_params.py
 echo     -n 5           Max 5 sends per Gmail profile this run
@@ -371,5 +382,7 @@ goto MAIN
 :PAUSE_RETURN_MAIN
 echo.
 echo  ------------------------------------------------------------------------
+echo  Script finished. Results retained on screen.
+echo  Press any key to close menu and return to command prompt.
 pause
-goto MAIN
+exit /b 0
