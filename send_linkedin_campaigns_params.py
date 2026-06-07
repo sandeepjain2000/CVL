@@ -47,6 +47,62 @@ def _format_elapsed(seconds: float) -> str:
     return f"{h}h {m}m {s}s"
 
 
+def fetch_all_time_sent_by_profile(conn) -> dict[str, int]:
+    """Total status=sent rows in email_attempts, keyed by lower(from_profile)."""
+    try:
+        rows = conn.execute(
+            """
+            SELECT lower(trim(from_profile)), count(*)
+            FROM email_attempts
+            WHERE lower(coalesce(status, '')) = 'sent'
+              AND from_profile IS NOT NULL
+              AND trim(from_profile) != ''
+            GROUP BY 1
+            """
+        ).fetchall()
+        return {r[0]: int(r[1]) for r in rows}
+    except sqlite3.OperationalError:
+        return {}
+
+
+def log_per_profile_send_summary(
+    profiles: list[dict],
+    run_sent: dict[str, int],
+    all_time: dict[str, int],
+) -> None:
+    """Per-Gmail-account counts — printed before the short RUN SUMMARY block."""
+    logger.info("")
+    logger.info("=" * 70)
+    logger.info("  PER-PROFILE SEND COUNTS (by Gmail account)")
+    logger.info("=" * 70)
+    logger.info(
+        f"  {'Gmail account':<42} {'This run':>9} {'All-time':>9}"
+    )
+    logger.info("  " + "-" * 62)
+    config_emails = {p["email"].lower() for p in profiles}
+    for p in profiles:
+        email = p["email"]
+        el = email.lower()
+        logger.info(
+            f"  {email:<42} {run_sent.get(el, 0):>9,} {all_time.get(el, 0):>9,}"
+        )
+    other = sorted(k for k in all_time if k not in config_emails)
+    if other:
+        logger.info("  " + "-" * 62)
+        logger.info("  Other accounts with sends in DB (not in this run's profile list):")
+        for el in other:
+            logger.info(
+                f"  {el:<42} {run_sent.get(el, 0):>9,} {all_time.get(el, 0):>9,}"
+            )
+    run_total = sum(run_sent.values())
+    db_total = sum(all_time.values())
+    logger.info("  " + "-" * 62)
+    logger.info(
+        f"  {'TOTAL':<42} {run_total:>9,} {db_total:>9,}"
+    )
+    logger.info("=" * 70)
+
+
 def emit_run_summary(
     *,
     run_started_perf: float,
@@ -278,9 +334,13 @@ def load_companies(conn: sqlite3.Connection,
             )
             name_parts = clean_name.strip().split()
             if len(name_parts) >= 2:
+                first_name = name_parts[0]
+                last_name = " ".join(name_parts[1:])
+                if _english_name_parts(first_name, last_name) is None:
+                    continue
                 employees.append({
-                    "first_name": name_parts[0],
-                    "last_name":  " ".join(name_parts[1:]),
+                    "first_name": first_name,
+                    "last_name":  last_name,
                     "full_name":  clean_name,
                     "job_title":  clean_title,
                 })
@@ -523,6 +583,16 @@ def _to_ascii(s: str) -> str:
     return unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode("ascii")
 
 
+def _english_name_parts(first: str, last: str) -> tuple[str, str] | None:
+    """Return ASCII first/last parts for email formats, or None if not Latin-script."""
+    f = _to_ascii(first.lower().strip())
+    last_word = last.strip().split()[0] if last.strip() else ""
+    l = _to_ascii(last_word.lower())
+    if not f or not l or not f.isalpha() or not l.isalpha():
+        return None
+    return f, l
+
+
 # =============================================
 # EXCLUSION LIST
 # =============================================
@@ -625,12 +695,12 @@ def collect_valid_format_options(
     log_decisions: bool = True,
 ) -> list[tuple[str, str, str]]:
     """All format variants for *emp* that pass gates and validation_allows_send."""
-    first = emp["first_name"]
-    last = emp["last_name"].split()[0] if emp["last_name"] else ""
-    if not first.isalpha() or not last.isalpha():
+    parts = _english_name_parts(emp["first_name"], emp["last_name"])
+    if parts is None:
         if log_decisions:
-            logger.warning(f"    ⚠️  Skipping bad name: {emp['full_name']!r}")
+            logger.warning(f"    ⚠️  Skipping non-English name: {emp['full_name']!r}")
         return []
+    first, last = parts
 
     name_reason = is_excluded(exclusions, "", "", emp["full_name"])
     if name_reason:
@@ -706,15 +776,15 @@ def company_has_pending_validated_staff(
 def build_email_address(first: str, last: str, domain: str, fmt: str) -> str:
     """Generate email address for a given format."""
     f = _to_ascii(first.lower().strip())
-    l = _to_ascii(last.lower().strip().split()[0])  # first word of last name only
+    l = _to_ascii(last.lower().strip().split()[0]) if last.strip() else ""
     if fmt == "firstname.lastname":
         return f"{f}.{l}@{domain}"
     elif fmt == "firstname":
         return f"{f}@{domain}"
     elif fmt == "firstinitial.lastname":
-        return f"{f[0]}.{l}@{domain}"
+        return f"{(f[0] if f else '')}.{l}@{domain}"
     elif fmt == "firstname.lastinitial":
-        return f"{f}.{l[0]}@{domain}"
+        return f"{f}.{(l[0] if l else '')}@{domain}"
     return f"{f}.{l}@{domain}"
 
 
@@ -1260,6 +1330,8 @@ def main():
         logger.info("\n  ✅ No validated emails available to send.")
         logger.info("     Only zb_status=valid or custom mv_status=ok/valid addresses are queued.")
         log_no_queue_diagnostics(companies, progress, db_conn, exclusions)
+        all_time_sent = fetch_all_time_sent_by_profile(db_conn) if db_conn else {}
+        log_per_profile_send_summary(active_profiles, {}, all_time_sent)
         if db_conn:
             db_conn.close()
         emit_run_summary(
@@ -1332,6 +1404,7 @@ def main():
 
     total_success = 0
     total_failed  = 0
+    run_sent_by_profile: dict[str, int] = {}
     prev_prof_idx = None
     queued_count = len(interleaved)
     interrupted = False
@@ -1363,6 +1436,8 @@ def main():
 
             if send_one(smtp_password, profile["email"], email_data, progress, db_conn):
                 total_success += 1
+                prof_key = profile["email"].lower()
+                run_sent_by_profile[prof_key] = run_sent_by_profile.get(prof_key, 0) + 1
                 if total_success % EMAIL_BATCH_SIZE == 0:
                     logger.info(f"\n  🛑 Batch break after {total_success} sent — "
                                 f"waiting {EMAIL_BATCH_BREAK}s...")
@@ -1377,12 +1452,16 @@ def main():
         logger.info("\n  ⚠️  Interrupted — saving progress and closing DB...")
     finally:
         save_progress(progress)
+        all_time_sent = fetch_all_time_sent_by_profile(db_conn) if db_conn else {}
         if db_conn:
             db_conn.close()
         outcome = (
             "interrupted (Ctrl+C) — partial sends may have completed"
             if interrupted
             else "completed"
+        )
+        log_per_profile_send_summary(
+            active_profiles, run_sent_by_profile, all_time_sent
         )
         emit_run_summary(
             run_started_perf=run_started_perf,

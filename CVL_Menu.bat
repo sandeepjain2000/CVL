@@ -52,8 +52,8 @@ echo.
 echo   [1] TEST mode - 1 company, 1 employee (smoke test)
 echo       Command: %PY% linkedin_scraper.py --browser chromium
 echo.
-echo   [2] PRODUCTION - full caps, Chromium (recommended on Windows)
-echo       Command: %PY% linkedin_scraper.py --run --browser chromium
+echo   [2] PRODUCTION - full caps, Chromium - prompts 1, 2, or 3 runs
+echo       Command: %PY% linkedin_scraper.py --run --browser chromium  (~45 min each)
 echo.
 echo   [3] PRODUCTION - full caps, Firefox only
 echo       Command: %PY% linkedin_scraper.py --run --browser firefox
@@ -91,8 +91,29 @@ goto PAUSE_RETURN_MAIN
 
 :SCRAPER_PROD_CHROMIUM
 echo.
-echo  Running PRODUCTION scrape - Chromium...
+echo  PRODUCTION scrape - Chromium. Each run takes about 45 minutes.
+echo  Do not start if another scraper window is already running.
+echo.
+set "RUNS="
+set /p RUNS="  How many runs (1, 2, or 3): "
+if not "%RUNS%"=="1" if not "%RUNS%"=="2" if not "%RUNS%"=="3" (
+  echo  Invalid entry - using 1 run.
+  set "RUNS=1"
+)
+set "RUN_N=0"
+:SCRAPER_PROD_CHROMIUM_LOOP
+set /a RUN_N+=1
+echo.
+echo  === Production run %RUN_N% of %RUNS% - Chromium ===
 %PY% linkedin_scraper.py --run --browser chromium
+set "SCR_ERR=%ERRORLEVEL%"
+if not "%SCR_ERR%"=="0" echo  Run %RUN_N% finished with exit code %SCR_ERR%.
+if %RUN_N% LSS %RUNS% (
+  echo.
+  echo  Run %RUN_N% complete. Next run in 10 seconds - Ctrl+C to stop.
+  timeout /t 10 /nobreak >nul
+  goto SCRAPER_PROD_CHROMIUM_LOOP
+)
 goto PAUSE_RETURN_MAIN
 
 :SCRAPER_PROD_CHROMIUM_SILENT
@@ -279,10 +300,10 @@ goto PAUSE_RETURN_MAIN
 :RUN_SUMMARY
 cls
 echo.
-echo  Printing pipeline summary (no browser)...
-echo  Look for: ^>^>^> STILL REACHABLE
+echo  Pipeline summary from pre-saved DB snapshot - instant...
+echo  Refreshed after bounces [5], zeroclone, or DB views [4]
 echo.
-%PY% linkedin_scraper.py --summary-only
+%PY% scripts\print_pipeline_summary.py
 goto PAUSE_RETURN_MAIN
 
 :CHEAT_SHEET
@@ -292,15 +313,27 @@ echo  ========================================================================
 echo   CHEAT SHEET - order, parameters, files (for when you forget)
 echo  ========================================================================
 echo.
+echo  DAILY DEFAULTS (scraper already done — run in this order)
+echo  ---------------------------------------------------------
+echo   Tool            Batch file                          Menu path
+echo   ----            ----------                          ---------
+echo   Zeroclone       ..\zeroclone\Zeroclone_Menu.bat     [1] -^> [1]
+echo                   or ..\zeroclone\run_cycle.bat       (direct; same job)
+echo   CVL bounces      CVL_Menu.bat                        [5]
+echo   CVL summary      CVL_Menu.bat                        [6]
+echo   CVL send         CVL_Menu.bat                        [2] -^> [2]
+echo   CVL pool opt.    CVL_Menu.bat                        [3] -^> [1]
+echo   Zeroclone resume ..\zeroclone\run_cycle_resume.bat   (after Apify quota stop)
+echo.
 echo  RECOMMENDED RUN ORDER (typical week)
 echo  ------------------------------------
 echo   1. Scraper [1] -^> PRODUCTION Chromium  (--run --browser chromium)
 echo   2. Zeroclone validation (external) -^> updates employee_email_state.csv
-echo   3. Database [4] -^> apply_validation_views.py  (sync CSV + rebuild views)
+echo   3. Database [4] only if views not refreshed by zeroclone run_cycle
 echo   4. Summary [6] -^> read ^>^>^> STILL REACHABLE  (how many left to pursue)
-echo   5. Campaign [2] -^> send_linkedin_campaigns_params.py -n 5
+echo   5. Campaign [2] -^> [2] send_linkedin_campaigns_params.py -n 5
 echo   6. Next day: Bounces [5] -^> check_bounces.py  (marks bounced in DB)
-echo   7. Optional: Pool [3] -^> send_validated_pool.py  (allowlist leftovers)
+echo   7. Optional: Pool [3] -^> [1] send_validated_pool.py  (allowlist leftovers)
 echo   8. Summary [6] again -^> see updated counts
 echo.
 echo  FIRST TIME / NEW MACHINE

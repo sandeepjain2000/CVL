@@ -136,6 +136,20 @@ def prevent_windows_sleep() -> Generator[None, None, None]:
         except Exception as e:
             logger.error("Failed to restore Windows sleep state: %s", e)
 
+# --summary-only: skip Playwright import; delegate to lightweight summary script.
+if __name__ == "__main__" and any(
+    a.strip().lower() == "--summary-only" for a in sys.argv[1:]
+):
+    import subprocess
+
+    _summary_script = Path(__file__).resolve().parent / "scripts" / "print_pipeline_summary.py"
+    raise SystemExit(
+        subprocess.call(
+            [sys.executable, str(_summary_script)],
+            cwd=str(Path(__file__).resolve().parent),
+        )
+    )
+
 from playwright.async_api import (
     Error as PlaywrightError,
     async_playwright,
@@ -2677,20 +2691,32 @@ def _employee_email_outreach_stats(conn: sqlite3.Connection) -> dict[str, int]:
         WITH base AS (
             {base_select}
         ),
-        per_employee AS (
+        attempt_stats AS (
             SELECT
-                b.employee_id,
-                b.cascade_exhausted_no_valid,
+                {dom_ea} AS company_domain,
+                trim(ea.employee_name) AS employee_name,
                 COUNT(ea.id) AS attempt_count,
                 SUM(
                     CASE WHEN lower(COALESCE(ea.status, '')) = 'sent' THEN 1 ELSE 0 END
                 ) AS sent_count
+            FROM email_attempts ea
+            WHERE ea.company_domain IS NOT NULL
+              AND trim(ea.company_domain) != ''
+              AND ea.employee_name IS NOT NULL
+              AND trim(ea.employee_name) != ''
+            GROUP BY 1, 2
+        ),
+        per_employee AS (
+            SELECT
+                b.employee_id,
+                b.cascade_exhausted_no_valid,
+                COALESCE(ast.attempt_count, 0) AS attempt_count,
+                COALESCE(ast.sent_count, 0) AS sent_count
             FROM base b
-            LEFT JOIN email_attempts ea ON (
-                {dom_ea} = b.company_domain
-                AND trim(ea.employee_name) = b.employee_name
+            LEFT JOIN attempt_stats ast ON (
+                ast.company_domain = b.company_domain
+                AND ast.employee_name = b.employee_name
             )
-            GROUP BY b.employee_id, b.cascade_exhausted_no_valid
         )
         SELECT
             SUM(
@@ -2736,6 +2762,7 @@ def print_db_summary_to_logger() -> None:
             conn.close()
             return
         names = [d[0] for d in conn.execute("SELECT * FROM v_validation_pipeline_summary").description]
+        logger.info("Computing STILL REACHABLE (aggregating email_attempts)...")
         outreach = _employee_email_outreach_stats(conn)
         logger.info("")
         logger.info("=" * 72)
@@ -3164,9 +3191,6 @@ if __name__ == "__main__":
     )
     if _custom_kw:
         logger.info("Employee focus keywords: %s", ", ".join(_custom_kw))
-    if _cli.summary_only:
-        print_db_summary_to_logger()
-        sys.exit(0)
     if not _cli.run:
         apply_test_mode_limits()
     else:

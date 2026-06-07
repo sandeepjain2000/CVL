@@ -36,6 +36,15 @@ from datetime import datetime, timedelta
 from email.message import EmailMessage
 from email.utils import parseaddr
 
+_SCRIPTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts")
+if _SCRIPTS not in sys.path:
+    sys.path.insert(0, _SCRIPTS)
+from pipeline_summary_cache import (  # noqa: E402
+    VIEW_METRIC_KEYS,
+    load_pipeline_summary_snapshot,
+    refresh_pipeline_summary_snapshot,
+)
+
 # Reconfigure stdout/stderr to UTF-8 to prevent UnicodeEncodeError on Windows console when printing emojis
 if hasattr(sys.stdout, 'reconfigure'):
     try:
@@ -168,32 +177,21 @@ AUTOMATED_SENDER_PREFIXES = [
     "promo@",
 ]
 
-# Keywords that strongly suggest a genuine career-related reply.
-# NOTE: these are intentionally specific — generic business words like
-# "opportunity" or "profile" are NOT included because they appear in
-# marketing emails too.
-CAREER_KEYWORDS = [
-    "job application",
-    "your application",
-    "we received your",
-    "thank you for applying",
+# Forward gate: subject must contain at least one anchor from outbound campaign
+# subjects (see generate_subject in send_linkedin_campaigns_params.py) plus
+# common reply terms. Re: threads keep these words ~99% of the time.
+FORWARD_SUBJECT_KEYWORDS = [
+    "delivery",
+    "project",
+    "management",
+    "leader",
+    "profile",
+    "interest",
+    "international",
+    "scaling",
+    "sandeep jain",
     "interview",
-    "job offer",
-    "offer letter",
-    "hiring",
-    "recruiter",
-    "recruitment",
-    "candidate",
-    "vacancy",
-    "job opening",
-    "open position",
-    "freelance",
-    "full-time",
-    "part-time",
-    "onboarding",
-    "talent acquisition",
-    "campus placement",
-    "sandeep jain",        # always forward if his name is in subject/body
+    "discussion",
 ]
 
 # Keywords that indicate marketing / sales / newsletter junk.
@@ -229,6 +227,22 @@ JUNK_KEYWORDS = [
     "one link",
     "boost your",
     "grow your",
+]
+
+# App tests, school portals, generic alerts — never career replies.
+IRRELEVANT_SUBJECT_KEYWORDS = [
+    "test app",
+    "action required",
+    "important reminders",
+    "important reminder",
+    "reminder:",
+    "your account",
+    "verify your",
+    "password reset",
+    "security alert",
+    "sign-in attempt",
+    "new login",
+    "confirm your email",
 ]
 
 # =============================================
@@ -354,10 +368,13 @@ def classify_email_via_llm(subject: str, from_addr: str, body: str, has_reply_he
     system_prompt = (
         "You are an email analysis assistant. You are analyzing an incoming email to decide if it should be forwarded.\n"
         "The email was received by Sandeep Jain, who sent out outbound career/placement outreach.\n\n"
+        "The subject already contains a campaign anchor word (Delivery, Project, Management, "
+        "Leader, profile, Interest, international, scaling, Sandeep Jain, Interview, or Discussion).\n"
         "Evaluate the email against these rules:\n"
-        "1. MUST be a reply to Sandeep's email (a response/reply, e.g. thread context, Re: in subject, or referencing prior outreach). Do NOT forward if it is a new cold outreach, spam, newsletter, notifications, alerts, or not a reply.\n"
-        "2. MUST NOT be an auto-response (automated out-of-office, automated delivery receipts, auto-replies, mailer-daemon, automated follow-ups, or automated confirmations).\n"
-        "3. MUST NOT be a decline (declined, rejected, not interested, no openings, unsubscribe, not hiring, or direct rejection). We only want positive replies, questions, requests for info/resume, interest, or direct human discussion.\n\n"
+        "1. MUST be a human reply to Sandeep's outreach (not a new cold email, spam, newsletter, or notification).\n"
+        "2. MUST NOT be an auto-response (out-of-office, mailer-daemon, automated confirmations).\n"
+        "3. MUST NOT be a decline (not interested, no openings, unsubscribe, not hiring, rejection).\n"
+        "Forward only positive replies, questions, requests for info/resume, or direct human discussion.\n\n"
         "Analyze the email and output a JSON response in the following format:\n"
         "{\n"
         "  \"is_reply\": true/false,\n"
@@ -763,37 +780,60 @@ def is_system_or_bounce_msg(msg) -> bool:
     return False
 
 
-def is_career_related(subject: str, body: str) -> bool:
+def _normalize_subject(subject: str) -> str:
+    return (subject or "No Subject").replace("\r", "").replace("\n", "")
+
+
+def _has_reply_headers(msg) -> bool:
+    return bool(msg.get("In-Reply-To") or msg.get("References"))
+
+
+def _subject_has_forward_keyword(subject: str) -> bool:
+    """True if subject contains at least one FORWARD_SUBJECT_KEYWORDS anchor."""
+    subject_lower = (subject or "").lower()
+    return any(kw in subject_lower for kw in FORWARD_SUBJECT_KEYWORDS)
+
+
+def _header_skip_reason(from_header: str, subject: str) -> str | None:
     """
-    Return True ONLY if the email is a genuine career / job-application reply.
-
-    Rules (in order):
-      1. 'Sandeep Jain' anywhere in subject → always forward (personal reply).
-      2. ANY junk keyword in subject → never forward (marketing/sales tool).
-      3. Career keyword in SUBJECT → forward (strong signal).
-      4. Career keyword in body but NOT in subject → do NOT forward.
-         Body-only matches produce too many false positives from marketing
-         emails whose bodies happen to contain words like 'opportunity'.
+    Return a short reason if this INBOX message should not enter the career path.
+    Forwarding requires at least one campaign subject keyword (Re: replies keep them).
     """
-    subject_lower = subject.lower()
-    body_lower    = body.lower()
+    subject_lower = (subject or "").lower().strip()
+    if not subject_lower:
+        return "empty subject"
 
-    # Rule 1 — personal reply addressed to Sandeep
-    if "sandeep jain" in subject_lower or "sandeep jain" in body_lower:
-        return True
+    for word in JUNK_KEYWORDS:
+        if word in subject_lower:
+            return f"junk subject ({word})"
 
-    # Rule 2 — junk/marketing subject → hard skip
+    for word in IRRELEVANT_SUBJECT_KEYWORDS:
+        if word in subject_lower:
+            return f"irrelevant subject ({word})"
+
+    _, sender_email = parseaddr(from_header or "")
+    sender_email = sender_email.lower()
+    if sender_email:
+        for prefix in AUTOMATED_SENDER_PREFIXES:
+            if sender_email.startswith(prefix):
+                return "automated sender"
+        for pattern in BOUNCE_SENDERS:
+            if pattern in sender_email:
+                return "system sender"
+
+    if not _subject_has_forward_keyword(subject):
+        return "no campaign subject keyword"
+
+    return None
+
+
+def subject_qualifies_for_forward(subject: str) -> bool:
+    """Subject-only forward gate (used when Nvidia LLM keys are unavailable)."""
+    subject_lower = (subject or "").lower()
     for word in JUNK_KEYWORDS:
         if word in subject_lower:
             return False
-
-    # Rule 3 — career keyword must appear in the SUBJECT
-    for word in CAREER_KEYWORDS:
-        if word in subject_lower:
-            return True
-
-    # Rule 4 — body-only match is not enough
-    return False
+    return _subject_has_forward_keyword(subject)
 
 
 def extract_body(msg, html: bool = False) -> str:
@@ -909,9 +949,14 @@ def process_account(gmail_address: str, app_password: str,
     reconnects = 0
     tagged_non_career_headers = 0
 
-    HDRFETCH = "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT AUTO-SUBMITTED X-FAILED-RECIPIENTS)])"
+    HDRFETCH = (
+        "(BODY.PEEK[HEADER.FIELDS "
+        "(FROM SUBJECT AUTO-SUBMITTED X-FAILED-RECIPIENTS IN-REPLY-TO REFERENCES)])"
+    )
     bounce_uids: list = []
     career_uids: list = []
+    irrelevant_uids: list = []
+    irrelevant_reasons: dict[str, int] = {}
 
     logger.info(
         f"  {ap}Pass 1: headers for {len(ids_list)} email(s) "
@@ -969,10 +1014,12 @@ def process_account(gmail_address: str, app_password: str,
             if raw_hdr is None:
                 continue
 
-            h        = email.message_from_bytes(raw_hdr)
-            sender   = (h.get("From", "") or "").lower()
-            subject  = (h.get("Subject", "") or "").lower()
-            failed_r = (h.get("X-Failed-Recipients", "") or "").lower()
+            h           = email.message_from_bytes(raw_hdr)
+            from_hdr    = h.get("From", "") or ""
+            sender      = from_hdr.lower()
+            raw_subject = h.get("Subject", "") or ""
+            subject     = raw_subject.lower()
+            failed_r    = (h.get("X-Failed-Recipients", "") or "").lower()
 
             is_bounce_hdr = (
                 any(p in sender for p in BOUNCE_SENDERS)
@@ -981,15 +1028,46 @@ def process_account(gmail_address: str, app_password: str,
             )
             if is_bounce_hdr:
                 bounce_uids.append(uid)
+                continue
+
+            norm_subject = _normalize_subject(raw_subject)
+            if already_forwarded(conn, gmail_address, norm_subject, from_hdr):
+                irrelevant_uids.append(uid)
+                irrelevant_reasons["already forwarded"] = (
+                    irrelevant_reasons.get("already forwarded", 0) + 1
+                )
+                continue
+
+            skip_reason = _header_skip_reason(from_hdr, raw_subject)
+            if skip_reason:
+                irrelevant_uids.append(uid)
+                irrelevant_reasons[skip_reason] = irrelevant_reasons.get(skip_reason, 0) + 1
             else:
                 career_uids.append(uid)
 
         bstart += HEADER_FETCH_BATCH
         reconnects = 0
 
+    if irrelevant_uids:
+        tagged_irrelevant = 0
+        for uid in irrelevant_uids:
+            try:
+                _tag_career_message(mail, uid, GMAIL_LABEL_NON_CAREER)
+                tagged_irrelevant += 1
+            except Exception as tag_err:
+                logger.warning(f"  Could not tag irrelevant UID {uid!r}: {tag_err}")
+        reason_bits = ", ".join(
+            f"{reason}={count}" for reason, count in sorted(irrelevant_reasons.items())
+        )
+        logger.info(
+            f"  {ap}Pass 1 skipped {tagged_irrelevant} irrelevant INBOX message(s) "
+            f"({reason_bits}) — no LLM / forward pass"
+        )
+
     logger.info(
         f"  {ap}Pass 1 done — bounce branch: {len(bounce_uids)}, "
-        f"career branch: {len(career_uids)}"
+        f"career branch: {len(career_uids)}, "
+        f"irrelevant skipped: {len(irrelevant_uids)}"
     )
 
     # ── Pass 2a: bounces (BODY.PEEK[]) ───────────────────────────
@@ -1060,6 +1138,7 @@ def process_account(gmail_address: str, app_password: str,
 
     forward_count = 0
     reconnects = 0
+    seen_forwarded_log: set[tuple[str, str, str]] = set()
     i = 0
     while i < len(career_uids):
         uid = career_uids[i]
@@ -1085,22 +1164,41 @@ def process_account(gmail_address: str, app_password: str,
                 continue
 
             email_message = email.message_from_bytes(raw_email)
-            orig_subject = (
-                email_message.get("Subject", "No Subject") or "No Subject"
-            )
-            orig_subject = orig_subject.replace("\r", "").replace("\n", "")
+            orig_subject = _normalize_subject(email_message.get("Subject", "No Subject"))
             orig_sender = email_message.get("From", "Unknown")
 
             if already_forwarded(conn, gmail_address, orig_subject, orig_sender):
-                logger.info(f"  {ap}⏭️  Already forwarded: {orig_subject}")
-                _tag_career_message(mail, uid, GMAIL_LABEL_NON_CAREER)
+                dedupe_key = (gmail_address, orig_subject, orig_sender)
+                if dedupe_key not in seen_forwarded_log:
+                    seen_forwarded_log.add(dedupe_key)
+                    logger.info(f"  {ap}⏭️  Already forwarded: {orig_subject}")
+                _tag_career_message(mail, uid, GMAIL_LABEL_FORWARDED, GMAIL_LABEL_NON_CAREER)
                 if has_fwd_pending:
                     _imap_uid_remove_label(mail, uid, GMAIL_LABEL_FWD_PENDING)
                 i += 1
                 continue
 
+            skip_reason = _header_skip_reason(orig_sender, orig_subject)
+            if skip_reason:
+                log_processed(
+                    conn, execution_id, gmail_address,
+                    orig_sender, orig_subject, f"skipped_header_{skip_reason[:24]}",
+                )
+                _tag_career_message(mail, uid, GMAIL_LABEL_NON_CAREER)
+                i += 1
+                continue
+
             # A. If it was already labeled as FWD-PEND-CAREER in a previous execution:
             if has_fwd_pending:
+                if not _subject_has_forward_keyword(orig_subject):
+                    logger.info(
+                        f"  {ap}⏭️  Dropping pending — no campaign subject keyword: {orig_subject}"
+                    )
+                    _imap_uid_remove_label(mail, uid, GMAIL_LABEL_FWD_PENDING)
+                    _tag_career_message(mail, uid, GMAIL_LABEL_NON_CAREER)
+                    i += 1
+                    continue
+
                 if forward_count >= MAX_FORWARDS_PER_ACCOUNT:
                     logger.info(
                         f"  {ap}🛑 Forward limit reached ({MAX_FORWARDS_PER_ACCOUNT}) — "
@@ -1151,18 +1249,17 @@ def process_account(gmail_address: str, app_password: str,
             html_text  = extract_body(email_message, html=True)
             combined   = plain_text + " " + html_text
 
-            has_reply_headers = bool(email_message.get("In-Reply-To") or email_message.get("References"))
+            has_reply_headers = _has_reply_headers(email_message)
             
-            # Classification
+            # Classification (subject keyword gate already passed above)
             if not NVIDIA_KEYS:
-                # Heuristic fallback
-                if is_career_related(orig_subject, combined):
+                if subject_qualifies_for_forward(orig_subject):
                     classification = {
                         "should_forward": True,
                         "is_reply": True,
                         "is_auto_response": False,
                         "is_decline": False,
-                        "reason": "Heuristic fallback (no LLM keys)"
+                        "reason": "subject keyword match (no LLM keys)"
                     }
                 else:
                     classification = {
@@ -1170,7 +1267,7 @@ def process_account(gmail_address: str, app_password: str,
                         "is_reply": False,
                         "is_auto_response": False,
                         "is_decline": False,
-                        "reason": "Heuristic fallback (no LLM keys)"
+                        "reason": "no campaign subject keyword"
                     }
             else:
                 logger.info(f"  {ap}🤖 Classifying reply via Nvidia LLM (Llama 3.3): {orig_subject}...")
@@ -1273,19 +1370,30 @@ def process_account(gmail_address: str, app_password: str,
 
 def print_db_summary_to_logger(conn: sqlite3.Connection) -> None:
     try:
-        row = conn.execute("SELECT * FROM v_validation_pipeline_summary").fetchone()
-        if not row:
+        refreshed_at = refresh_pipeline_summary_snapshot(conn)
+        snapshot = load_pipeline_summary_snapshot(conn)
+        if not snapshot:
             return
-        names = [d[0] for d in conn.execute("SELECT * FROM v_validation_pipeline_summary").description]
         logger.info("")
         logger.info("=" * 60)
-        logger.info("  DATABASE PIPELINE SUMMARY (v_validation_pipeline_summary)")
+        logger.info("  PIPELINE SUMMARY RESULTS (pipeline_summary_results)")
+        logger.info(f"  Refreshed at: {refreshed_at}")
         logger.info("=" * 60)
-        for name, val in zip(names, row):
-            logger.info(f"  {name:<30}: {val:,}" if isinstance(val, int) else f"  {name:<30}: {val}")
+        logger.info(
+            "  %-30s: %s",
+            "still_reachable",
+            f"{int(snapshot['still_reachable']):,}",
+        )
+        for key in VIEW_METRIC_KEYS:
+            val = snapshot[key]
+            logger.info(
+                "  %-30s: %s",
+                key,
+                f"{int(val):,}" if isinstance(val, int) else val,
+            )
         logger.info("=" * 60)
     except Exception as e:
-        logger.warning(f"Could not print database validation summary: {e}")
+        logger.warning(f"Could not refresh/print pipeline summary snapshot: {e}")
 
 
 # =============================================

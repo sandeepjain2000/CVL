@@ -206,7 +206,7 @@ SELECT
 FROM v_scrapeable_employees s
 LEFT JOIN employee_email_state st ON st.employee_key = s.employee_key;
 
--- Single-row dashboard (matches manual validation count report)
+-- Single-row dashboard (one pass over v_employee_validation_status, not six)
 CREATE VIEW IF NOT EXISTS v_validation_pipeline_summary AS
 SELECT
     (SELECT count(*) FROM employees) AS total_employee_rows,
@@ -216,18 +216,29 @@ SELECT
      FROM v_scrapeable_employees s
      LEFT JOIN employee_email_state st ON st.employee_key = s.employee_key
      WHERE st.employee_key IS NULL) AS never_in_validation_cycle,
-    (SELECT count(*) FROM v_employee_validation_status WHERE has_resolved_valid = 1) AS resolved_valid_count,
-    (SELECT count(*) FROM v_employee_validation_status WHERE eligible_any_format = 1) AS still_eligible_for_validation,
-    (SELECT count(*) FROM v_employee_validation_status WHERE eligible_firstname_lastname = 1) AS eligible_firstname_lastname,
-    (SELECT count(*) FROM v_employee_validation_status WHERE eligible_firstname = 1) AS eligible_firstname,
-    (SELECT count(*) FROM v_employee_validation_status WHERE eligible_firstinitial_lastname = 1) AS eligible_firstinitial_lastname,
-    (SELECT count(*) FROM v_employee_validation_status WHERE eligible_firstname_lastinitial = 1) AS eligible_firstname_lastinitial,
-    (SELECT count(*) FROM v_employee_validation_status WHERE cascade_exhausted_no_valid = 1) AS cascade_exhausted_no_valid,
+    evs.resolved_valid_count,
+    evs.still_eligible_for_validation,
+    evs.eligible_firstname_lastname,
+    evs.eligible_firstname,
+    evs.eligible_firstinitial_lastname,
+    evs.eligible_firstname_lastinitial,
+    evs.cascade_exhausted_no_valid,
     (SELECT count(*) FROM v_zerobounce_allowlisted) AS allowlisted_addresses,
     (SELECT count(*) FROM v_validated_pool_sendable) AS pool_sendable_addresses,
     (SELECT count(*) FROM email_attempts) AS email_attempts_total,
     (SELECT count(*) FROM email_attempts WHERE status = 'sent') AS email_attempts_sent,
-    (SELECT count(*) FROM email_attempts WHERE status = 'bounced') AS email_attempts_bounced;
+    (SELECT count(*) FROM email_attempts WHERE status = 'bounced') AS email_attempts_bounced
+FROM (
+    SELECT
+        sum(CASE WHEN has_resolved_valid = 1 THEN 1 ELSE 0 END) AS resolved_valid_count,
+        sum(CASE WHEN eligible_any_format = 1 THEN 1 ELSE 0 END) AS still_eligible_for_validation,
+        sum(CASE WHEN eligible_firstname_lastname = 1 THEN 1 ELSE 0 END) AS eligible_firstname_lastname,
+        sum(CASE WHEN eligible_firstname = 1 THEN 1 ELSE 0 END) AS eligible_firstname,
+        sum(CASE WHEN eligible_firstinitial_lastname = 1 THEN 1 ELSE 0 END) AS eligible_firstinitial_lastname,
+        sum(CASE WHEN eligible_firstname_lastinitial = 1 THEN 1 ELSE 0 END) AS eligible_firstname_lastinitial,
+        sum(CASE WHEN cascade_exhausted_no_valid = 1 THEN 1 ELSE 0 END) AS cascade_exhausted_no_valid
+    FROM v_employee_validation_status
+) evs;
 
 -- Allowlist vs send tracking
 CREATE VIEW IF NOT EXISTS v_allowlist_send_status AS

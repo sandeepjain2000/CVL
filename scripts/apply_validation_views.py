@@ -18,8 +18,14 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+SCRIPTS = ROOT / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+from pipeline_summary_cache import ensure_results_table, refresh_pipeline_summary_snapshot
+
 DEFAULT_DB = ROOT / "data" / "db" / "linkedin_data.db"
 SQL_FILE = ROOT / "sql" / "validation_pipeline_views.sql"
+RESULTS_SQL_FILE = ROOT / "sql" / "pipeline_summary_results.sql"
 DEFAULT_STATE_CSV = (
     ROOT.parent / "zeroclone" / "cycles" / "state" / "employee_email_state.csv"
 )
@@ -124,10 +130,15 @@ def main() -> int:
             print(f"Synced {n} rows into employee_email_state from CSV.")
         apply_views(conn, SQL_FILE)
         print(f"Applied views from {SQL_FILE}")
+        if RESULTS_SQL_FILE.is_file():
+            ensure_results_table(conn)
+            print(f"Ensured results table from {RESULTS_SQL_FILE}")
         views = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='view' AND name LIKE 'v_%' ORDER BY 1"
         ).fetchall()
         print("Views:", ", ".join(v[0] for v in views))
+        refreshed_at = refresh_pipeline_summary_snapshot(conn)
+        print(f"Saved pipeline summary snapshot at {refreshed_at}")
         print_summary(conn)
     finally:
         conn.close()
