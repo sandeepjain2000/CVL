@@ -541,7 +541,7 @@ def send_one(
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ctx) as server:
             server.login(from_email, smtp_password)
             server.send_message(msg)
-        logger.info("    ✓ SENT → %s", email_data["recipient"])
+        logger.info("    SENT -> %s", email_data["recipient"])
         record_send(
             conn,
             email_data["recipient"],
@@ -558,7 +558,7 @@ def send_one(
         time.sleep(EMAIL_SEND_DELAY)
         return True
     except smtplib.SMTPAuthenticationError:
-        logger.error("    ✗ AUTH ERROR for %s — check App Password", from_email)
+        logger.error("    FAIL AUTH ERROR for %s - check App Password", from_email)
         return False
     except Exception as e:
         logger.error("    ✗ ERROR: %s", e)
@@ -693,14 +693,14 @@ def main() -> None:
         p["sent_today"] = sent_today
         status_str = f"{sent_today}/30 sent today"
         if sent_today >= 30:
-            logger.info("    Profile %s: %s 🛑 (LIMIT REACHED - skipping profile for this run)", p["email"], status_str)
+            logger.info("    Profile %s: %s [LIMIT] skipping profile for this run", p["email"], status_str)
         else:
-            logger.info("    Profile %s: %s ✅ (%s remaining)", p["email"], status_str, 30 - sent_today)
+            logger.info("    Profile %s: %s OK (%s remaining)", p["email"], status_str, 30 - sent_today)
             remaining_profiles.append(p)
     profiles = remaining_profiles
 
     if not profiles:
-        logger.error("❌ No profiles available to send (all reached daily limit of 30).")
+        logger.error("No profiles available to send (all reached daily limit of 30).")
         conn.close()
         sys.exit(0)
 
@@ -734,22 +734,25 @@ def main() -> None:
 
             # Enforce hard daily limit of 30 sends
             if prof.get("sent_today", 0) >= 30:
-                logger.warning("\n  ⚠️ Profile %s has reached the daily limit of 30 sends (sent today: %s). Skipping email to %s.", prof["email"], prof["sent_today"], email_data["recipient"])
+                logger.warning(
+                    "\n  WARN Profile %s reached daily limit of 30 (sent today: %s). Skipping %s.",
+                    prof["email"], prof["sent_today"], email_data["recipient"],
+                )
                 continue
 
             if prev is not None and prof_idx != prev:
                 logger.info(
-                    "\n  🔄 Profile %s — waiting %ss...",
+                    "\n  Switching to profile %s - waiting %ss...",
                     prof_idx + 1,
                     PROFILE_SWITCH_DELAY,
                 )
                 time.sleep(PROFILE_SWITCH_DELAY)
-            logger.info("\n  [%s/%s] %s → %s", i, len(interleaved), prof["email"], email_data["recipient"])
+            logger.info("\n  [%s/%s] %s -> %s", i, len(interleaved), prof["email"], email_data["recipient"])
             if send_one(pw, prof["email"], email_data, conn, progress):
                 ok += 1
                 prof["sent_today"] = prof.get("sent_today", 0) + 1
                 if ok % EMAIL_BATCH_SIZE == 0:
-                    logger.info("\n  🛑 Batch break — %ss", EMAIL_BATCH_BREAK)
+                    logger.info("\n  Batch break - waiting %ss", EMAIL_BATCH_BREAK)
                     time.sleep(EMAIL_BATCH_BREAK)
             else:
                 fail += 1

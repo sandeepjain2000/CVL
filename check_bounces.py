@@ -39,7 +39,10 @@ from email.utils import parseaddr
 _SCRIPTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts")
 if _SCRIPTS not in sys.path:
     sys.path.insert(0, _SCRIPTS)
+from load_dotenv_file import load_dotenv_file, resolve_env_path  # noqa: E402
 from pipeline_summary_cache import (  # noqa: E402
+    SUMMARY_LABELS,
+    SUMMARY_LABEL_WIDTH,
     VIEW_METRIC_KEYS,
     load_pipeline_summary_snapshot,
     refresh_pipeline_summary_snapshot,
@@ -61,8 +64,15 @@ if hasattr(sys.stderr, 'reconfigure'):
 # CONFIG
 # =============================================
 _SCRIPT_DIR      = os.path.dirname(os.path.abspath(__file__))
+load_dotenv_file(os.path.join(_SCRIPT_DIR, ".env"))
+
 SMTP_CONFIG_FILE = r"C:\Users\sandeep\Downloads\Claudes\EmailJson\email_config.json"
 DB_PATH          = os.path.join(_SCRIPT_DIR, "data", "db", "linkedin_data.db")
+
+# DeepSeek LLM fallback (when NVIDIA NIM times out).
+# Prefer DEEPSEEK_KEY_FILE in .env (relative to project root), e.g. ../keysai/api_keys.json
+# JSON key label: "deepseek_api_key" (same style as openai_api_key / gemini_api_key).
+DEEPSEEK_KEY_FILE = ""
 
 # Each run gets its own timestamped log file inside a logs/ subfolder
 _LOG_DIR = os.path.join(_SCRIPT_DIR, "logs")
@@ -74,11 +84,11 @@ LOG_FILE = os.path.join(
 
 
 def _profile_progress_label(sr_no: int, total: int) -> str:
-    """1-based index in email_config.json ``profiles`` order → ``[i/N — pct%]``."""
+    """1-based index in email_config.json ``profiles`` order -> ``[i/N - pct%]``."""
     if total <= 0:
-        return "[0/0 — 0.0%]"
+        return "[0/0 - 0.0%]"
     pct = 100.0 * sr_no / total
-    return f"[{sr_no}/{total} — {pct:.1f}%]"
+    return f"[{sr_no}/{total} - {pct:.1f}%]"
 
 
 # IMAP / SMTP settings for Gmail
@@ -280,11 +290,112 @@ def _setup_logging() -> logging.Logger:
 
 
 logger = _setup_logging()
-logger.info(f"📄 Log file: {LOG_FILE}")
+logger.info(f"Log file: {LOG_FILE}")
 
 # =============================================
-# NVIDIA NIM KEY ROTATION & LLM CLASSIFICATION
+# LLM CLASSIFICATION (NVIDIA NIM primary, DeepSeek fallback)
 # =============================================
+
+DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
+DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
+DEEPSEEK_LLM_TIMEOUT = 30
+
+
+def _parse_deepseek_key_file(path: str, out: dict) -> dict:
+    """Read api_key from plain text or JSON key file."""
+    with open(path, encoding="utf-8-sig") as f:
+        raw = f.read().strip()
+    if not raw:
+        return out
+    if raw.startswith("{"):
+        data = json.loads(raw)
+        if isinstance(data.get("deepseek"), dict):
+            ds = data["deepseek"]
+            out["api_key"] = (ds.get("api_key") or "").strip()
+            out["model"] = (ds.get("model") or out["model"]).strip() or DEEPSEEK_DEFAULT_MODEL
+            out["base_url"] = (ds.get("base_url") or out["base_url"]).strip() or DEEPSEEK_DEFAULT_BASE_URL
+        else:
+            out["api_key"] = (
+                data.get("api_key") or data.get("deepseek_api_key") or ""
+            ).strip()
+            out["model"] = (data.get("model") or out["model"]).strip() or DEEPSEEK_DEFAULT_MODEL
+            out["base_url"] = (data.get("base_url") or out["base_url"]).strip() or DEEPSEEK_DEFAULT_BASE_URL
+    else:
+        out["api_key"] = raw.splitlines()[0].strip()
+    return out
+
+
+def _load_deepseek_settings() -> dict:
+    """
+    Load DeepSeek settings (priority order):
+      1. DEEPSEEK_API_KEY env
+      2. DEEPSEEK_KEY_FILE env
+      3. DEEPSEEK_KEY_FILE constant in this file
+      4. DEEPSEEK_CONFIG env (legacy, full api_key.json)
+    """
+    out = {
+        "api_key": os.environ.get("DEEPSEEK_API_KEY", "").strip(),
+        "model": os.environ.get("DEEPSEEK_MODEL", DEEPSEEK_DEFAULT_MODEL).strip()
+        or DEEPSEEK_DEFAULT_MODEL,
+        "base_url": os.environ.get("DEEPSEEK_BASE_URL", DEEPSEEK_DEFAULT_BASE_URL).strip()
+        or DEEPSEEK_DEFAULT_BASE_URL,
+    }
+    if out["api_key"]:
+        return out
+
+    key_path = resolve_env_path(
+        os.environ.get("DEEPSEEK_KEY_FILE", "").strip()
+        or (DEEPSEEK_KEY_FILE or "").strip()
+        or os.environ.get("DEEPSEEK_CONFIG", "").strip(),
+        _SCRIPT_DIR,
+    )
+    if not key_path:
+        return out
+    if not os.path.isfile(key_path):
+        logger.warning("DeepSeek key file not found: %s", key_path)
+        return out
+    try:
+        out = _parse_deepseek_key_file(key_path, out)
+        if out["api_key"]:
+            logger.info("DeepSeek key loaded from %s", key_path)
+    except Exception as e:
+        logger.warning("Could not read DeepSeek key file %s: %s", key_path, e)
+    return out
+
+
+def _call_chat_completions_api(
+    *,
+    url: str,
+    api_key: str,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    timeout: int,
+) -> str:
+    import urllib.request
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.1,
+        "max_tokens": 512,
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        res_data = json.loads(response.read().decode("utf-8"))
+        return res_data["choices"][0]["message"]["content"]
+
 
 def load_nvidia_keys() -> list:
     keys_dir = r"C:\Users\sandeep\Downloads\Claudes\code-review-tool\nvidia_keys"
@@ -307,6 +418,11 @@ def load_nvidia_keys() -> list:
 
 NVIDIA_KEYS = load_nvidia_keys()
 NVIDIA_KEY_INDEX = 0
+_DEEPSEEK_SETTINGS = _load_deepseek_settings()
+if _DEEPSEEK_SETTINGS.get("api_key"):
+    logger.info("DeepSeek fallback configured (%s).", _DEEPSEEK_SETTINGS["model"])
+else:
+    logger.info("DeepSeek fallback not configured (optional).")
 
 def get_next_nvidia_key() -> str:
     global NVIDIA_KEY_INDEX
@@ -317,46 +433,77 @@ def get_next_nvidia_key() -> str:
     return key
 
 def call_nvidia_llm_with_rotation(system_prompt: str, user_prompt: str) -> str:
-    import urllib.request
-    
     url = "https://integrate.api.nvidia.com/v1/chat/completions"
-    payload = {
-        "model": "meta/llama-3.3-70b-instruct",
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-        "temperature": 0.1,
-        "max_tokens": 512
-    }
-    
+    model = "meta/llama-3.3-70b-instruct"
+
     max_attempts = min(5, len(NVIDIA_KEYS)) if NVIDIA_KEYS else 1
     for attempt in range(max_attempts):
         api_key = get_next_nvidia_key()
         if not api_key:
             logger.error("No Nvidia API key available.")
             return ""
-            
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}"
-            },
-            method="POST"
-        )
-        
+
         try:
-            with urllib.request.urlopen(req, timeout=15) as response:
-                res_data = json.loads(response.read().decode("utf-8"))
-                return res_data["choices"][0]["message"]["content"]
+            return _call_chat_completions_api(
+                url=url,
+                api_key=api_key,
+                model=model,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                timeout=15,
+            )
         except Exception as e:
-            logger.warning(f"Nvidia LLM call failed with key attempt {attempt + 1}: {e}. Rotating key.")
+            logger.warning(
+                "Nvidia LLM call failed with key attempt %s: %s. Rotating key.",
+                attempt + 1,
+                e,
+            )
             time.sleep(1)
-            
+
     logger.error("All Nvidia LLM key attempts failed.")
     return ""
+
+
+def call_deepseek_llm(system_prompt: str, user_prompt: str) -> str:
+    """Fallback when NVIDIA NIM fails (timeout, outage, etc.)."""
+    settings = _load_deepseek_settings()
+    if not settings["api_key"]:
+        logger.warning(
+            "DeepSeek fallback skipped - no API key (set DEEPSEEK_KEY_FILE or DEEPSEEK_API_KEY)."
+        )
+        return ""
+
+    url = settings["base_url"].rstrip("/") + "/chat/completions"
+    logger.info("Trying DeepSeek fallback (%s)...", settings["model"])
+    for attempt in range(2):
+        try:
+            out = _call_chat_completions_api(
+                url=url,
+                api_key=settings["api_key"],
+                model=settings["model"],
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                timeout=DEEPSEEK_LLM_TIMEOUT,
+            )
+            logger.info("DeepSeek fallback succeeded.")
+            return out
+        except Exception as e:
+            logger.warning(
+                "DeepSeek LLM call failed (attempt %s/2): %s",
+                attempt + 1,
+                e,
+            )
+            time.sleep(1)
+    logger.error("DeepSeek fallback failed after 2 attempts.")
+    return ""
+
+
+def call_llm_for_classification(system_prompt: str, user_prompt: str) -> str:
+    """NVIDIA first (key rotation), then DeepSeek if NVIDIA cannot classify."""
+    out = call_nvidia_llm_with_rotation(system_prompt, user_prompt)
+    if out:
+        return out
+    return call_deepseek_llm(system_prompt, user_prompt)
 
 def classify_email_via_llm(subject: str, from_addr: str, body: str, has_reply_headers: bool) -> dict:
     """
@@ -403,7 +550,7 @@ def classify_email_via_llm(subject: str, from_addr: str, body: str, has_reply_he
         "reason": "Fallback due to LLM failure or parse error"
     }
     
-    llm_output = call_nvidia_llm_with_rotation(system_prompt, user_prompt)
+    llm_output = call_llm_for_classification(system_prompt, user_prompt)
     if not llm_output:
         return fallback_res
         
@@ -623,7 +770,7 @@ def _career_inbox_unprocessed_uids(mail: imaplib.IMAP4_SSL) -> set:
     """
     logger.info(
         f"  Inbox scan: SINCE last {LOOKBACK_DAYS} days, "
-        f"excluding label {GMAIL_LABEL_PROCESSED!r} and {GMAIL_LABEL_FORWARDED!r} (X-GM-LABELS)…"
+        f"excluding label {GMAIL_LABEL_PROCESSED!r} and {GMAIL_LABEL_FORWARDED!r} (X-GM-LABELS)..."
     )
     return _inbox_uids_since_without_processed_label(
         mail, LOOKBACK_DAYS, GMAIL_LABEL_PROCESSED, GMAIL_LABEL_FORWARDED
@@ -1061,11 +1208,11 @@ def process_account(gmail_address: str, app_password: str,
         )
         logger.info(
             f"  {ap}Pass 1 skipped {tagged_irrelevant} irrelevant INBOX message(s) "
-            f"({reason_bits}) — no LLM / forward pass"
+            f"({reason_bits}) - no LLM / forward pass"
         )
 
     logger.info(
-        f"  {ap}Pass 1 done — bounce branch: {len(bounce_uids)}, "
+        f"  {ap}Pass 1 done - bounce branch: {len(bounce_uids)}, "
         f"career branch: {len(career_uids)}, "
         f"irrelevant skipped: {len(irrelevant_uids)}"
     )
@@ -1270,7 +1417,7 @@ def process_account(gmail_address: str, app_password: str,
                         "reason": "no campaign subject keyword"
                     }
             else:
-                logger.info(f"  {ap}🤖 Classifying reply via Nvidia LLM (Llama 3.3): {orig_subject}...")
+                logger.info(f"  {ap} Classifying reply via LLM (Nvidia, DeepSeek fallback): {orig_subject}...")
                 classification = classify_email_via_llm(orig_subject, orig_sender, combined, has_reply_headers)
                 logger.info(f"    - LLM Result: should_forward={classification['should_forward']}, reply={classification['is_reply']}, auto={classification['is_auto_response']}, decline={classification['is_decline']}, reason={classification['reason']}")
 
@@ -1378,20 +1525,24 @@ def print_db_summary_to_logger(conn: sqlite3.Connection) -> None:
         logger.info("=" * 60)
         logger.info("  PIPELINE SUMMARY RESULTS (pipeline_summary_results)")
         logger.info(f"  Refreshed at: {refreshed_at}")
-        logger.info("=" * 60)
+        logger.info("=" * 72)
+        w = SUMMARY_LABEL_WIDTH
         logger.info(
-            "  %-30s: %s",
-            "still_reachable",
+            "  %-*s: %s",
+            w,
+            SUMMARY_LABELS["still_reachable"],
             f"{int(snapshot['still_reachable']):,}",
         )
         for key in VIEW_METRIC_KEYS:
             val = snapshot[key]
+            label = SUMMARY_LABELS.get(key, key)
             logger.info(
-                "  %-30s: %s",
-                key,
+                "  %-*s: %s",
+                w,
+                label,
                 f"{int(val):,}" if isinstance(val, int) else val,
             )
-        logger.info("=" * 60)
+        logger.info("=" * 72)
     except Exception as e:
         logger.warning(f"Could not refresh/print pipeline summary snapshot: {e}")
 
@@ -1427,7 +1578,7 @@ def main():
     logger.info(f"  {len(known_addresses)} email addresses in campaign DB")
 
     if not known_addresses:
-        logger.info("  No sent emails in DB — run a send campaign first.")
+        logger.info("  No sent emails in DB - run a send campaign first.")
 
     # Log this run
     cur = conn.execute(
@@ -1454,9 +1605,9 @@ def main():
 
     for sr_no, (gmail_address, app_password) in enumerate(profile_list, start=1):
         prog = _profile_progress_label(sr_no, total_profiles)
-        logger.info(f"\n{'─'*55}")
+        logger.info(f"\n{'-'*55}")
         logger.info(f"  {prog} Account: {gmail_address}")
-        logger.info(f"{'─'*55}")
+        logger.info(f"{'-'*55}")
 
         result = process_account(
             gmail_address, app_password,
@@ -1528,5 +1679,9 @@ if __name__ == "__main__":
         logger.error(f"Fatal error: {e}")
         traceback.print_exc()
     finally:
-        if sys.stdin and sys.stdin.isatty():
+        if (
+            sys.stdin
+            and sys.stdin.isatty()
+            and not os.environ.get("CVL_UNATTENDED")
+        ):
             input("\n  Press Enter to exit...")

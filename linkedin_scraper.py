@@ -2549,7 +2549,9 @@ _PIPELINE_SUMMARY_LABELS: dict[str, str] = {
     ),
     "rows_in_employee_email_state": "Employees tracked in email-validation state table",
     "never_in_validation_cycle": "Outreach-ready employees never started in validation cycle",
-    "resolved_valid_count": "Employees with at least one confirmed valid email address",
+    "resolved_valid_count": (
+        "Employees with confirmed valid email - both sent and unsent"
+    ),
     "still_eligible_for_validation": "Still eligible for another validation / format attempt",
     "eligible_firstname_lastname": "Next format to try: firstname.lastname@domain",
     "eligible_firstname": "Next format to try: firstname@domain",

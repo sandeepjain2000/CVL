@@ -26,6 +26,8 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from pipeline_summary_cache import (
+    SUMMARY_LABELS,
+    SUMMARY_LABEL_WIDTH,
     VIEW_METRIC_KEYS,
     _count_validation_unprocessed,
     load_pipeline_summary_snapshot,
@@ -33,38 +35,6 @@ from pipeline_summary_cache import (
 )
 
 DB_PATH = ROOT / "data" / "db" / "linkedin_data.db"
-
-_LABELS = {
-    "total_employee_rows": "All employee rows in database",
-    "scrapeable_employees": (
-        "Outreach-ready (domain + name) — includes already-contacted employees"
-    ),
-    "rows_in_employee_email_state": "Employees tracked in email-validation state table",
-    "never_in_validation_cycle": (
-        "Outreach-ready employees never started in validation cycle"
-    ),
-    "resolved_valid_count": (
-        "Employees with at least one confirmed valid email address"
-    ),
-    "still_eligible_for_validation": (
-        "Still eligible for another validation / format attempt"
-    ),
-    "eligible_firstname_lastname": "Next format to try: firstname.lastname@domain",
-    "eligible_firstname": "Next format to try: firstname@domain",
-    "eligible_firstinitial_lastname": (
-        "Next format to try: f.lastname@domain (first initial)"
-    ),
-    "eligible_firstname_lastinitial": (
-        "Next format to try: firstname.l@domain (last initial)"
-    ),
-    "cascade_exhausted_no_valid": "All format patterns tried — no valid address found",
-    "allowlisted_addresses": "Allowlisted addresses (trusted / skip re-validation)",
-    "pool_sendable_addresses": "Addresses in send pool (ready for campaign)",
-    "email_attempts_total": "Total email_attempts rows (every send + bounce record)",
-    "email_attempts_sent": "Attempts with status sent (SMTP accepted)",
-    "email_attempts_bounced": "Attempts with status bounced / delivery failed",
-}
-
 
 def _quick_counts(conn: sqlite3.Connection) -> dict[str, int]:
     """Fast counts from base tables only (no heavy views)."""
@@ -116,10 +86,11 @@ def _quick_counts(conn: sqlite3.Connection) -> dict[str, int]:
 
 
 def _print_row(label: str, val: int | str) -> None:
+    w = SUMMARY_LABEL_WIDTH
     if isinstance(val, int):
-        print(f"  {label:<55}: {val:,}")
+        print(f"  {label:<{w}}: {val:,}")
     else:
-        print(f"  {label:<55}: {val}")
+        print(f"  {label:<{w}}: {val}")
 
 
 def _print_failed_records_summary(snapshot: dict[str, int | str]) -> None:
@@ -152,13 +123,13 @@ def _print_from_snapshot(snapshot: dict[str, int | str]) -> None:
     print("  Table: pipeline_summary_results  |  --refresh to recompute now")
     print()
     _print_row(
-        ">>> STILL REACHABLE: no successful send, formats not all exhausted",
+        f">>> {SUMMARY_LABELS['still_reachable']}",
         int(snapshot["still_reachable"]),
     )
     print("       (never emailed + bounce-only; excludes all formats exhausted)")
     print()
     for key in VIEW_METRIC_KEYS:
-        _print_row(_LABELS.get(key, key), int(snapshot[key]))
+        _print_row(SUMMARY_LABELS.get(key, key), int(snapshot[key]))
     print()
     _print_failed_records_summary(snapshot)
     print("  --- Per-employee outreach breakdown ---")
@@ -201,7 +172,7 @@ def _print_quick(conn: sqlite3.Connection) -> None:
         "email_attempts_bounced",
     ):
         if key in counts:
-            _print_row(_LABELS.get(key, key), counts[key])
+            _print_row(SUMMARY_LABELS.get(key, key), counts[key])
     print()
     _print_failed_records_summary(counts)
     print("=" * 72)

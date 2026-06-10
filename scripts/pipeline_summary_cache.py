@@ -45,6 +45,63 @@ ZERO_REGISTRY_DB = ROOT.parent / "zeroclone" / "cycles" / "state" / "pipeline_re
 
 TABLE_NAME = "pipeline_summary_results"
 
+# Human-readable labels for console / log output (shared by summary scripts)
+SUMMARY_LABEL_WIDTH = 72
+SUMMARY_LABELS: dict[str, str] = {
+    "still_reachable": (
+        "STILL REACHABLE - no successful send, formats not all exhausted"
+    ),
+    "total_employee_rows": "All employee rows in database",
+    "scrapeable_employees": (
+        "Outreach-ready (domain + name) - includes already-contacted employees"
+    ),
+    "rows_in_employee_email_state": (
+        "Employees tracked in email-validation state table"
+    ),
+    "never_in_validation_cycle": (
+        "Outreach-ready employees never started in validation cycle"
+    ),
+    "resolved_valid_count": (
+        "Employees with confirmed valid email - both sent and unsent"
+    ),
+    "still_eligible_for_validation": (
+        "Still eligible for another validation / format attempt"
+    ),
+    "eligible_firstname_lastname": (
+        "Next format to try: firstname.lastname@domain"
+    ),
+    "eligible_firstname": "Next format to try: firstname@domain",
+    "eligible_firstinitial_lastname": (
+        "Next format to try: f.lastname@domain (first initial)"
+    ),
+    "eligible_firstname_lastinitial": (
+        "Next format to try: firstname.l@domain (last initial)"
+    ),
+    "cascade_exhausted_no_valid": (
+        "All format patterns tried - no valid address found"
+    ),
+    "allowlisted_addresses": (
+        "Allowlisted addresses (trusted / skip re-validation)"
+    ),
+    "pool_sendable_addresses": (
+        "Addresses in send pool (ready for campaign)"
+    ),
+    "email_attempts_total": (
+        "Total email_attempts rows (every send + bounce record)"
+    ),
+    "email_attempts_sent": "Attempts with status sent (SMTP accepted)",
+    "email_attempts_bounced": (
+        "Attempts with status bounced / delivery failed"
+    ),
+    "never_emailed_once": "Never emailed - not even one attempt",
+    "all_attempts_failed": (
+        "Emailed before but every attempt failed (0 sent, has bounce rows)"
+    ),
+    "validation_unprocessed": (
+        "Validation unprocessed (zeroclone partial runs)"
+    ),
+}
+
 
 def _count_validation_unprocessed() -> int:
     if not ZERO_REGISTRY_DB.is_file():
