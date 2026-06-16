@@ -30,6 +30,13 @@ RUNNER = SCRIPTS / "pipeline_batch_runner.py"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 from load_dotenv_file import load_dotenv_file  # noqa: E402
+from pipeline_notify import (  # noqa: E402
+    load_pipeline_config,
+    notify_run_complete,
+    notify_stage,
+    notify_step_end,
+    notify_step_start,
+)
 
 load_dotenv_file(ROOT / ".env")
 
@@ -110,6 +117,7 @@ def _run_step(
     cwd: Path | None,
     log_path: Path,
     env: dict,
+    voice_config: dict,
 ) -> tuple[int, bool]:
     print(f"\n  Running: {name}")
     log_path.open("a", encoding="utf-8").write(
@@ -121,7 +129,9 @@ def _run_step(
         return 1, True
     step_id = (start.stdout or "").strip().splitlines()[-1]
 
+    notify_step_start(voice_config, name)
     code = _tee_run(cmd, cwd=cwd, log_path=log_path, env=env)
+    notify_step_end(voice_config, name, code)
 
     end = _runner("step-end", str(batch_id), step_id, str(code), name)
     if end.returncode != 0:
@@ -232,6 +242,8 @@ def main() -> int:
         encoding="utf-8",
     )
     batch_id = _start_batch(master_log, args.scraper_runs)
+    voice_config = load_pipeline_config()
+    notify_stage(voice_config, "run_start")
     order = 0
     any_fail = False
     py = _py()
@@ -239,7 +251,16 @@ def main() -> int:
     def step(name: str, cmd: list[str], cwd: Path | None = None) -> None:
         nonlocal order, any_fail
         order += 1
-        code, fail = _run_step(batch_id, order, name, cmd, cwd=cwd, log_path=master_log, env=env)
+        code, fail = _run_step(
+            batch_id,
+            order,
+            name,
+            cmd,
+            cwd=cwd,
+            log_path=master_log,
+            env=env,
+            voice_config=voice_config,
+        )
         if fail:
             any_fail = True
             print(f"  WARNING: {name} exited with code {code} — continuing pipeline")
@@ -271,6 +292,7 @@ def main() -> int:
         step("pool_sender", [py, str(ROOT / "send_validated_pool.py"), "-n", "5"])
 
     _finish_batch(batch_id, any_fail)
+    notify_run_complete(voice_config, had_errors=any_fail)
     status = "COMPLETED WITH ERRORS" if any_fail else "COMPLETED OK"
     print()
     print(f"  Pipeline {status}")

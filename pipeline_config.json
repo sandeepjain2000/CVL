@@ -1,0 +1,6 @@
+{
+  "pipeline_complete_voice": true,
+  "pipeline_stage_voice": true,
+  "pipeline_complete_voice_message": "CVL full pipeline complete.",
+  "pipeline_complete_error_message": "CVL full pipeline finished with errors."
+}
