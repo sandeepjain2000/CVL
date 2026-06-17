@@ -76,11 +76,50 @@ BEEPS_ENABLED = True
 # ---------------------------------------------------------------------------
 # AUDIO ALERTS  —  Windows beeps at key script events
 # ---------------------------------------------------------------------------
-def _beep(freq_hz: int, duration_ms: int) -> None:
+_SCRIPTS_DIR = Path(__file__).resolve().parent / "scripts"
+
+
+def _audio_config() -> dict:
+    try:
+        if str(_SCRIPTS_DIR) not in sys.path:
+            sys.path.insert(0, str(_SCRIPTS_DIR))
+        from pipeline_notify import load_pipeline_config
+
+        return load_pipeline_config()
+    except Exception:
+        return {}
+
+
+def _notify_page_open(kind: str, *, label: str = "") -> None:
+    """Short beep on each navigation; throttled voice from pipeline_config.json."""
+    try:
+        if str(_SCRIPTS_DIR) not in sys.path:
+            sys.path.insert(0, str(_SCRIPTS_DIR))
+        from pipeline_notify import load_pipeline_config, notify_scrape_page_open
+
+        notify_scrape_page_open(
+            load_pipeline_config(),
+            kind,
+            label=label,
+            allow_beep=BEEPS_ENABLED,
+        )
+    except Exception:
+        pass
+
+
+def _beep(freq_hz: int, duration_ms: int, *, volume_kind: str = "stage") -> None:
     """Play a Windows beep unless beeps are disabled by CLI."""
     if not BEEPS_ENABLED:
         return
-    winsound.Beep(freq_hz, duration_ms)
+    try:
+        if str(_SCRIPTS_DIR) not in sys.path:
+            sys.path.insert(0, str(_SCRIPTS_DIR))
+        from pipeline_notify import beep_volume, beep_with_volume
+
+        cfg = _audio_config()
+        beep_with_volume(freq_hz, duration_ms, beep_volume(cfg, kind=volume_kind))
+    except Exception:
+        winsound.Beep(freq_hz, duration_ms)
 
 
 def beep_ok() -> None:
@@ -100,10 +139,10 @@ def beep_company_change() -> None:
 
 def beep_done() -> None:
     """Rising triple beep + long finish tone — entire run finished."""
-    _beep(600, 200)
-    _beep(900, 200)
-    _beep(1200, 400)
-    _beep(750, 2000)   # extra-long final beep (~2 s) — execution complete
+    _beep(600, 200, volume_kind="completion")
+    _beep(900, 200, volume_kind="completion")
+    _beep(1200, 400, volume_kind="completion")
+    _beep(750, 2000, volume_kind="completion")   # extra-long final beep (~2 s)
 
 
 # ---------------------------------------------------------------------------
@@ -1411,6 +1450,7 @@ async def _open_linkedin_feed(page: Page, *, browser_label: str) -> bool:
             )
             continue
         if "linkedin.com" in page.url.lower():
+            _notify_page_open("feed")
             return True
         logger.warning(
             "%s: tab did not reach LinkedIn after attempt %d (url=%r).",
@@ -1893,6 +1933,7 @@ async def discover_companies(
         try:
             await page.bring_to_front()   # keep browser foreground → prevent OS timer throttle
             await page.goto(base_url, wait_until="domcontentloaded", timeout=35_000)
+            _notify_page_open("search")
             await sleep_rand(*DELAY_MEDIUM, label="post-nav page 0")
         except Exception as exc:
             logger.warning("  Failed to load base URL: %s", exc)
@@ -1928,6 +1969,7 @@ async def discover_companies(
                     await page.bring_to_front()   # keep browser foreground → prevent OS timer throttle
                     await page.goto(next_url, wait_until="domcontentloaded",
                                     timeout=35_000)
+                    _notify_page_open("search")
                     await sleep_rand(*DELAY_MEDIUM, label=f"post-nav page {pg}")
                 except Exception as exc:
                     logger.warning("  Page %d nav error: %s", pg, exc)
@@ -2036,6 +2078,7 @@ async def scrape_about_section(context, company_url: str) -> dict:
     page = await context.new_page()
     try:
         await page.goto(about_url, wait_until="domcontentloaded", timeout=30_000)
+        _notify_page_open("about")
         await sleep_rand(*DELAY_SHORT)
         await maybe_mouse_drift(page)
         await human_scroll(page, steps=3)
@@ -2150,6 +2193,7 @@ async def scrape_company_data(context, company_url: str, country_name: str) -> d
     for attempt in range(3):
         try:
             await page.goto(company_url, wait_until="domcontentloaded", timeout=40_000)
+            _notify_page_open("company", label=company_url.rstrip("/").split("/")[-1][:40])
             await sleep_rand(*DELAY_MEDIUM)
             await maybe_mouse_drift(page)
             await human_scroll(page, steps=4)
@@ -2409,6 +2453,7 @@ async def discover_employees(
         try:
             await page.goto(people_url,
                             wait_until="domcontentloaded", timeout=40_000)
+            _notify_page_open("people", label=company_name[:40])
             await sleep_rand(*DELAY_MEDIUM)
             await maybe_mouse_drift(page)
             await human_scroll(page, steps=6)

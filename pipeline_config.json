@@ -2,5 +2,20 @@
   "pipeline_complete_voice": true,
   "pipeline_stage_voice": true,
   "pipeline_complete_voice_message": "CVL full pipeline complete.",
-  "pipeline_complete_error_message": "CVL full pipeline finished with errors."
+  "pipeline_complete_error_message": "CVL full pipeline finished with errors.",
+  "voice_volume": 40,
+  "beep_volume_percent": 90,
+  "stage_beep_volume_percent": 90,
+  "completion_beep_volume_percent": 100,
+  "scrape_navigation_voice": true,
+  "scrape_navigation_beep": true,
+  "scrape_navigation_beep_volume_percent": 85,
+  "scrape_navigation_voice_interval_seconds": 12,
+  "scrape_navigation_messages": {
+    "search": "Opening search results page.",
+    "company": "Opening company page.",
+    "about": "Opening about page.",
+    "people": "Opening employees page.",
+    "feed": "Opening LinkedIn feed."
+  }
 }
